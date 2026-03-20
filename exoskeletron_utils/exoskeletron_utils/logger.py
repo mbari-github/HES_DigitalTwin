@@ -131,7 +131,7 @@ class ExoLogger(Node):
         # ------------------------------------------------
         # Parametri
         # ------------------------------------------------
-        self.declare_parameter("output_dir", str(Path.home()) / "exo_logs")
+        self.declare_parameter("output_dir", str(Path.home() / "exo_logs"))
         self.declare_parameter("file_name", "exo_log.csv")
         self.declare_parameter("log_rate", 200.0)
         self.declare_parameter("flush_every_n_rows", 20)
