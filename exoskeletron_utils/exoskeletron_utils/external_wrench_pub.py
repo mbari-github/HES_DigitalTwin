@@ -13,10 +13,10 @@ class ExternalWrenchSinePublisher(Node):
 
         # Parametri ROS2
         self.declare_parameter('topic_name', '/exo_dynamics/external_wrench')
-        self.declare_parameter('publish_rate', 200.0)   # Hz
+        self.declare_parameter('publish_rate', 200.0)    # Hz
         self.declare_parameter('frequency', 0.05)        # Hz della sinusoide
         self.declare_parameter('f_min', -12.0)           # N
-        self.declare_parameter('f_max', 0.0)            # N
+        self.declare_parameter('f_max', 0.0)             # N
         self.declare_parameter('frame_id', 'world')
 
         topic_name = str(self.get_parameter('topic_name').value)
