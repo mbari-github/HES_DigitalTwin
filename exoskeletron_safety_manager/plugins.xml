@@ -1,0 +1,37 @@
+<!-- path deve corrispondere al nome messo in CMakeList -->
+<library path="safety_plugins"> 
+  <class
+    name="FaultMonitorMode"
+    type="functional_safety::FaultMonitorMode"
+    base_class_type="functional_safety::SafetyTools">
+    <description>Fault monitor plugin</description>
+  </class>
+
+  <class
+    name="SafeStopMode"
+    type="functional_safety::SafeStopMode"
+    base_class_type="functional_safety::SafetyTools">
+    <description>Safe stop plugin</description>
+  </class>
+
+  <class
+    name="CompliantMode"
+    type="functional_safety::CompliantMode"
+    base_class_type="functional_safety::SafetyTools">
+    <description>Compliant mode plugin</description>
+  </class>
+
+  <class
+    name="TorqueLimitMode"
+    type="functional_safety::TorqueLimitMode"
+    base_class_type="functional_safety::SafetyTools">
+    <description>Torque limit mode plugin</description>
+  </class>
+
+  <class
+    name="SensorDegradedMode"
+    type="functional_safety::SensorDegradedMode"
+    base_class_type="functional_safety::SafetyTools">
+    <description>Sensor degraded mode plugin</description>
+  </class>
+</library>

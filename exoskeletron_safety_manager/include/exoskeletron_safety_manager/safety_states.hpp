@@ -1,0 +1,16 @@
+#ifndef EXOSKELETRON_SAFETY_MANAGER_SAFETY_STATES_HPP
+#define EXOSKELETRON_SAFETY_MANAGER_SAFETY_STATES_HPP
+
+namespace functional_safety {
+
+enum class SafetyState {
+    FAULT_MONITOR,
+    SAFE_STOP,
+    COMPLIANT_MODE,
+    TORQUE_LIMIT_MODE,
+    SENSOR_DEGRADED_MODE
+};
+
+} 
+
+#endif

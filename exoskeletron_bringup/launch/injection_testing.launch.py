@@ -1,0 +1,201 @@
+from launch import LaunchDescription
+from launch_ros.actions import Node
+from ament_index_python.packages import get_package_share_directory
+import os
+
+
+def generate_launch_description():
+
+    description_pkg = get_package_share_directory('exoskeletron_description')
+    urdf_file = os.path.join(description_pkg, 'urdf', 'assembly_with_hand.urdf')
+
+    with open(urdf_file, 'r') as infp:
+        robot_description_content = infp.read()
+
+    # ============================================================
+    # CONFIGURAZIONE FAULT INJECTION
+    # ============================================================
+    # channel:
+    #   0 → /exo_dynamics/tau_ext_theta
+    #   1 → /trajectory_ref
+    #   2 → /torque
+    #   3 → /joint_states
+    #
+    # In questa fase SENZA bridge:
+    # - il solo canale selezionato viene trasformato in raw -> faulted
+    # - il nodo a valle legge il topic faulted
+    # - gli altri canali restano invariati
+    # ============================================================
+
+    FAULT_CHANNEL       = 0
+    FAULT_TYPE          = 'noise'
+    FAULT_MAGNITUDE     = 0.0
+    FAULT_ACTIVE        = False
+    NOISE_STD           = 0.1
+    SPIKE_DURATION      = 0.05
+    TARGET_INDEX        = 0
+    FAULT_JS_FIELD      = 'position'
+    JOINT_NAME          = 'rev_crank'
+
+    # ------------------------------------------------------------
+    # Remap per il fault injector:
+    # il nodo ha topic hardcoded:
+    #   sub: topic originale
+    #   pub: topic *_faulted
+    #
+    # Qui, solo sul canale selezionato, gli facciamo leggere da *_raw
+    # ------------------------------------------------------------
+    fault_injector_remaps = {
+        0: [
+            ('/exo_dynamics/tau_ext_theta', '/exo_dynamics/tau_ext_theta_raw'),
+            ('/exo_dynamics/tau_ext_theta_faulted', '/exo_dynamics/tau_ext_theta_faulted'),
+        ],
+        1: [
+            ('/trajectory_ref', '/trajectory_ref_raw'),
+            ('/trajectory_ref_faulted', '/trajectory_ref_faulted'),
+        ],
+        2: [
+            ('/torque', '/torque_raw'),
+            ('/torque_faulted', '/torque_faulted'),
+        ],
+        3: [
+            ('/joint_states', '/joint_states'),
+            ('/joint_states_faulted', '/joint_states_faulted'),
+        ],
+    }
+
+    # ------------------------------------------------------------
+    # Dynamics node
+    # - se fault channel 0: pubblica tau_ext su *_raw
+    # - se fault channel 2: legge torque_faulted
+    # ------------------------------------------------------------
+    dynamics_remaps = []
+    if FAULT_CHANNEL == 0:
+        dynamics_remaps.append(
+            ('/exo_dynamics/tau_ext_theta', '/exo_dynamics/tau_ext_theta_raw')
+        )
+    if FAULT_CHANNEL == 2:
+        dynamics_remaps.append(
+            ('/torque', '/torque_faulted')
+        )
+
+    # ------------------------------------------------------------
+    # Admittance controller
+    # - se fault channel 0: legge tau_ext_theta_faulted
+    # - se fault channel 1: pubblica trajectory_ref_raw
+    # - se fault channel 3: legge joint_states_faulted
+    # ------------------------------------------------------------
+    admittance_remaps = []
+    if FAULT_CHANNEL == 0:
+        admittance_remaps.append(
+            ('/exo_dynamics/tau_ext_theta', '/exo_dynamics/tau_ext_theta_faulted')
+        )
+    if FAULT_CHANNEL == 1:
+        admittance_remaps.append(
+            ('/trajectory_ref', '/trajectory_ref_raw')
+        )
+    if FAULT_CHANNEL == 3:
+        admittance_remaps.append(
+            ('/joint_states', '/joint_states_faulted')
+        )
+
+    # ------------------------------------------------------------
+    # Trajectory controller
+    # - se fault channel 1: legge trajectory_ref_faulted
+    # - se fault channel 2: pubblica torque_raw
+    # - se fault channel 3: legge joint_states_faulted
+    # ------------------------------------------------------------
+    trajectory_remaps = []
+    if FAULT_CHANNEL == 1:
+        trajectory_remaps.append(
+            ('/trajectory_ref', '/trajectory_ref_faulted')
+        )
+    if FAULT_CHANNEL == 2:
+        trajectory_remaps.append(
+            ('/torque', '/torque_raw')
+        )
+    if FAULT_CHANNEL == 3:
+        trajectory_remaps.append(
+            ('/joint_states', '/joint_states_faulted')
+        )
+
+    # ------------------------------------------------------------
+    # RViz
+    # - se fault channel 3: legge joint_states_faulted
+    # ------------------------------------------------------------
+    rviz_remaps = []
+    if FAULT_CHANNEL == 3:
+        rviz_remaps.append(
+            ('/joint_states', '/joint_states_faulted')
+        )
+
+    return LaunchDescription([
+
+        Node(
+            package='robot_state_publisher',
+            executable='robot_state_publisher',
+            name='robot_state_publisher',
+            output='screen',
+            parameters=[{'robot_description': robot_description_content}]
+        ),
+
+        Node(
+            package='exoskeletron_dynamics',
+            executable='exo_dynamics',
+            name='dynamics',
+            output='screen',
+            remappings=dynamics_remaps
+        ),
+
+        Node(
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2',
+            output='screen',
+            arguments=['-d', os.path.join(description_pkg, 'rviz', 'exo_display.rviz')],
+            remappings=rviz_remaps
+        ),
+
+        Node(
+            package='exoskeletron_control',
+            executable='admittance_controller',
+            name='admittance_controller',
+            output='screen',
+            remappings=admittance_remaps
+        ),
+
+        Node(
+            package='exoskeletron_control',
+            executable='trajectory_controller',
+            name='trajectory_controller',
+            output='screen',
+            remappings=trajectory_remaps
+        ),
+
+        Node(
+            package='exoskeletron_utils',
+            executable='external_wrench_pub',
+            name='input',
+            output='screen',
+        ),
+
+        Node(
+            package='exoskeletron_faults',
+            executable='fault_injector',
+            name='fault_injector',
+            output='screen',
+            parameters=[{
+                'channel':          FAULT_CHANNEL,
+                'fault_active':     FAULT_ACTIVE,
+                'fault_type':       FAULT_TYPE,
+                'fault_magnitude':  FAULT_MAGNITUDE,
+                'noise_std':        NOISE_STD,
+                'spike_duration':   SPIKE_DURATION,
+                'target_index':     TARGET_INDEX,
+                'fault_js_field':   FAULT_JS_FIELD,
+                'joint_name':       JOINT_NAME,
+                'publish_rate':     200.0,
+            }],
+            remappings=fault_injector_remaps[FAULT_CHANNEL]
+        ),
+    ])
