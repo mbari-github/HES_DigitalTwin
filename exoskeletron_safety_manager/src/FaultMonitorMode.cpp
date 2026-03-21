@@ -10,7 +10,13 @@ namespace functional_safety
 void FaultMonitorMode::initialize(const rclcpp::Node::SharedPtr & node)
 {
   node_ = node;
-  mode_request_sent_ = false;
+
+  last_requested_level_ = FaultResponseLevel::NOMINAL;
+  compliant_counter_ = 0;
+  torque_counter_ = 0;
+  stop_counter_ = 0;
+  message_received_ = false;
+  watchdog_triggered_ = false;
 
   bridge_status_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
     "/exo_bridge/status",
@@ -21,15 +27,20 @@ void FaultMonitorMode::initialize(const rclcpp::Node::SharedPtr & node)
   torque_limit_client_ = node_->create_client<std_srvs::srv::SetBool>("/torque_limit_request");
   safe_stop_client_ = node_->create_client<std_srvs::srv::SetBool>("/safe_stop_request");
 
+  watchdog_timer_ = node_->create_wall_timer(
+    std::chrono::milliseconds(100),
+    std::bind(&FaultMonitorMode::watchdog_callback, this));
+
   RCLCPP_INFO(
     node_->get_logger(),
-    "FaultMonitorMode initialized | tau thresholds = [%.3f, %.3f, %.3f] | vel thresholds = [%.3f, %.3f, %.3f]",
+    "FaultMonitorMode initialized | tau thresholds = [%.3f, %.3f, %.3f] | vel thresholds = [%.3f, %.3f, %.3f] | status timeout = %.3f s",
     tau_compliant_threshold_,
     tau_torque_limit_threshold_,
     tau_safe_stop_threshold_,
     vel_compliant_threshold_,
     vel_torque_limit_threshold_,
-    vel_safe_stop_threshold_);
+    vel_safe_stop_threshold_,
+    status_timeout_seconds_);
 }
 
 void FaultMonitorMode::stop()
@@ -60,6 +71,7 @@ void FaultMonitorMode::shutdown()
   }
 
   bridge_status_sub_.reset();
+  watchdog_timer_.reset();
   compliant_client_.reset();
   torque_limit_client_.reset();
   safe_stop_client_.reset();
@@ -118,6 +130,58 @@ FaultResponseLevel FaultMonitorMode::max_level(
   return (static_cast<int>(a) >= static_cast<int>(b)) ? a : b;
 }
 
+bool FaultMonitorMode::is_more_severe(
+  FaultResponseLevel candidate,
+  FaultResponseLevel current) const
+{
+  return static_cast<int>(candidate) > static_cast<int>(current);
+}
+
+void FaultMonitorMode::update_debounce_counters(FaultResponseLevel level)
+{
+  switch (level) {
+    case FaultResponseLevel::SAFE_STOP:
+      stop_counter_++;
+      torque_counter_ = 0;
+      compliant_counter_ = 0;
+      break;
+
+    case FaultResponseLevel::TORQUE_LIMIT:
+      torque_counter_++;
+      stop_counter_ = 0;
+      compliant_counter_ = 0;
+      break;
+
+    case FaultResponseLevel::COMPLIANT:
+      compliant_counter_++;
+      torque_counter_ = 0;
+      stop_counter_ = 0;
+      break;
+
+    case FaultResponseLevel::NOMINAL:
+    default:
+      compliant_counter_ = 0;
+      torque_counter_ = 0;
+      stop_counter_ = 0;
+      break;
+  }
+}
+
+FaultResponseLevel FaultMonitorMode::debounced_level() const
+{
+  if (stop_counter_ >= stop_count_threshold_) {
+    return FaultResponseLevel::SAFE_STOP;
+  }
+  if (torque_counter_ >= torque_count_threshold_) {
+    return FaultResponseLevel::TORQUE_LIMIT;
+  }
+  if (compliant_counter_ >= compliant_count_threshold_) {
+    return FaultResponseLevel::COMPLIANT;
+  }
+
+  return FaultResponseLevel::NOMINAL;
+}
+
 void FaultMonitorMode::bridge_status_callback(
   const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
@@ -125,30 +189,29 @@ void FaultMonitorMode::bridge_status_callback(
     return;
   }
 
-  // Layout /exo_bridge/status:
-  // [0] stop_active
-  // [1] override_active
-  // [2] theta
-  // [3] theta_dot
-  // [4] theta_hold
-  // [5] tau_in
-  // [6] tau_ext
-  // [7] control_mode_id
   if (msg->data.size() < 8) {
     RCLCPP_WARN(node_->get_logger(), "FaultMonitorMode: /exo_bridge/status malformed");
     return;
   }
 
-  if (mode_request_sent_) {
-    return;
-  }
+  message_received_ = true;
+  watchdog_triggered_ = false;
+  last_msg_time_ = node_->now();
 
   const double theta_dot = msg->data[3];
   const double tau_in = msg->data[5];
 
   const auto tau_level = evaluate_tau(tau_in);
   const auto vel_level = evaluate_velocity(theta_dot);
-  const auto final_level = max_level(tau_level, vel_level);
+  const auto instantaneous_level = max_level(tau_level, vel_level);
+
+  update_debounce_counters(instantaneous_level);
+
+  const auto final_level = debounced_level();
+
+  if (!is_more_severe(final_level, last_requested_level_)) {
+    return;
+  }
 
   switch (final_level) {
     case FaultResponseLevel::SAFE_STOP:
@@ -157,7 +220,7 @@ void FaultMonitorMode::bridge_status_callback(
         "FaultMonitorMode: SAFE_STOP requested | tau_in=%.3f theta_dot=%.3f",
         tau_in, theta_dot);
       request_safe_stop();
-      mode_request_sent_ = true;
+      last_requested_level_ = FaultResponseLevel::SAFE_STOP;
       break;
 
     case FaultResponseLevel::TORQUE_LIMIT:
@@ -166,7 +229,7 @@ void FaultMonitorMode::bridge_status_callback(
         "FaultMonitorMode: TORQUE_LIMIT requested | tau_in=%.3f theta_dot=%.3f",
         tau_in, theta_dot);
       request_torque_limit_mode();
-      mode_request_sent_ = true;
+      last_requested_level_ = FaultResponseLevel::TORQUE_LIMIT;
       break;
 
     case FaultResponseLevel::COMPLIANT:
@@ -175,12 +238,45 @@ void FaultMonitorMode::bridge_status_callback(
         "FaultMonitorMode: COMPLIANT requested | tau_in=%.3f theta_dot=%.3f",
         tau_in, theta_dot);
       request_compliant_mode();
-      mode_request_sent_ = true;
+      last_requested_level_ = FaultResponseLevel::COMPLIANT;
       break;
 
     case FaultResponseLevel::NOMINAL:
     default:
       break;
+  }
+}
+
+void FaultMonitorMode::watchdog_callback()
+{
+  if (!node_) {
+    return;
+  }
+
+  if (!message_received_) {
+    return;
+  }
+
+  const double elapsed = (node_->now() - last_msg_time_).seconds();
+
+  if (elapsed < status_timeout_seconds_) {
+    return;
+  }
+
+  if (watchdog_triggered_) {
+    return;
+  }
+
+  watchdog_triggered_ = true;
+
+  RCLCPP_ERROR(
+    node_->get_logger(),
+    "FaultMonitorMode watchdog timeout on /exo_bridge/status | elapsed=%.3f s",
+    elapsed);
+
+  if (is_more_severe(FaultResponseLevel::SAFE_STOP, last_requested_level_)) {
+    request_safe_stop();
+    last_requested_level_ = FaultResponseLevel::SAFE_STOP;
   }
 }
 

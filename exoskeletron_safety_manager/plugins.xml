@@ -28,10 +28,4 @@
     <description>Torque limit mode plugin</description>
   </class>
 
-  <class
-    name="SensorDegradedMode"
-    type="functional_safety::SensorDegradedMode"
-    base_class_type="functional_safety::SafetyTools">
-    <description>Sensor degraded mode plugin</description>
-  </class>
 </library>

@@ -13,13 +13,18 @@ def generate_launch_description():
         robot_description_content = infp.read()
 
     # ============================================================
+    # CONFIGURAZIONE GENERALE
+    # ============================================================
+    USE_FAULT_INJECTOR = True
+
+    # ============================================================
     # CONFIGURAZIONE FAULT INJECTION
     # ============================================================
     # channel:
-    #   0 → /exo_dynamics/tau_ext_theta
-    #   1 → /trajectory_ref
-    #   2 → /torque
-    #   3 → /joint_states
+    #   0 -> /exo_dynamics/tau_ext_theta
+    #   1 -> /trajectory_ref
+    #   2 -> /torque
+    #   3 -> /joint_states
     #
     # Con bridge:
     #
@@ -46,7 +51,7 @@ def generate_launch_description():
     #       -> letto da controllori, rviz e bridge
     # ============================================================
 
-    FAULT_CHANNEL       = 3
+    FAULT_CHANNEL       = 0
     FAULT_TYPE          = 'freeze'
     FAULT_MAGNITUDE     = 0.0
     FAULT_ACTIVE        = False
@@ -80,53 +85,74 @@ def generate_launch_description():
 
     # ------------------------------------------------------------
     # dynamics
-    # - pubblica tau_ext su raw se fault channel 0
+    # - con fault injector e channel 0:
+    #     pubblica /exo_dynamics/tau_ext_theta_raw
+    # - senza fault injector:
+    #     pubblica il topic nominale /exo_dynamics/tau_ext_theta
     # - legge sempre /torque finale dal bridge
     # ------------------------------------------------------------
     dynamics_remaps = []
-    if FAULT_CHANNEL == 0:
+    if USE_FAULT_INJECTOR and FAULT_CHANNEL == 0:
         dynamics_remaps.append(
             ('/exo_dynamics/tau_ext_theta', '/exo_dynamics/tau_ext_theta_raw')
         )
 
     # ------------------------------------------------------------
     # admittance controller
-    # - pubblica SEMPRE /trajectory_ref_raw
-    # - legge tau_ext faulted se ch 0
-    # - legge joint_states faulted se ch 3
+    #
+    # senza injector:
+    #   legge /exo_dynamics/tau_ext_theta
+    #   legge /joint_states
+    #   pubblica /trajectory_ref_raw
+    #
+    # con injector:
+    #   continua a pubblicare /trajectory_ref_raw
+    #   se ch 0 legge /exo_dynamics/tau_ext_theta_faulted
+    #   se ch 3 legge /joint_states_faulted
     # ------------------------------------------------------------
     admittance_remaps = [
         ('/trajectory_ref', '/trajectory_ref_raw'),
     ]
-    if FAULT_CHANNEL == 0:
-        admittance_remaps.append(
-            ('/exo_dynamics/tau_ext_theta', '/exo_dynamics/tau_ext_theta_faulted')
-        )
-    if FAULT_CHANNEL == 3:
-        admittance_remaps.append(
-            ('/joint_states', '/joint_states_faulted')
-        )
+
+    if USE_FAULT_INJECTOR:
+        if FAULT_CHANNEL == 0:
+            admittance_remaps.append(
+                ('/exo_dynamics/tau_ext_theta', '/exo_dynamics/tau_ext_theta_faulted')
+            )
+        if FAULT_CHANNEL == 3:
+            admittance_remaps.append(
+                ('/joint_states', '/joint_states_faulted')
+            )
 
     # ------------------------------------------------------------
     # trajectory controller
-    # - legge SEMPRE /trajectory_ref finale dal bridge
-    # - pubblica SEMPRE /torque_raw
-    # - legge joint_states faulted se ch 3
+    #
+    # senza injector:
+    #   legge /trajectory_ref dal bridge
+    #   legge /joint_states
+    #   pubblica /torque_raw
+    #
+    # con injector:
+    #   legge /trajectory_ref dal bridge
+    #   pubblica /torque_raw
+    #   se ch 3 legge /joint_states_faulted
     # ------------------------------------------------------------
     trajectory_remaps = [
         ('/torque', '/torque_raw'),
     ]
-    if FAULT_CHANNEL == 3:
+
+    if USE_FAULT_INJECTOR and FAULT_CHANNEL == 3:
         trajectory_remaps.append(
             ('/joint_states', '/joint_states_faulted')
         )
 
     # ------------------------------------------------------------
     # rviz
-    # - legge joint_states faulted se ch 3
+    # senza injector: legge /joint_states
+    # con injector e ch 3: legge /joint_states_faulted
     # ------------------------------------------------------------
     rviz_remaps = []
-    if FAULT_CHANNEL == 3:
+    if USE_FAULT_INJECTOR and FAULT_CHANNEL == 3:
         rviz_remaps.append(
             ('/joint_states', '/joint_states_faulted')
         )
@@ -134,41 +160,46 @@ def generate_launch_description():
     # ------------------------------------------------------------
     # exo_bridge
     #
-    # di default legge:
-    #   /trajectory_ref_raw
-    #   /torque_raw
-    #   /joint_states
-    #   /exo_dynamics/tau_ext_theta
+    # senza injector:
+    #   legge:
+    #       /trajectory_ref_raw
+    #       /torque_raw
+    #       /joint_states
+    #       /exo_dynamics/tau_ext_theta
     #
-    # se c'è fault su canale 1 o 2, gli facciamo leggere il FAULTED
-    # al posto del RAW corrispondente.
-    #
-    # se c'è fault su canale 0 o 3, gli facciamo leggere i sensori faulted
-    # per coerenza con il resto del sistema e per monitoraggio.
+    # con injector:
+    #   ch 0 -> legge tau_ext_theta_faulted
+    #   ch 1 -> legge trajectory_ref_faulted al posto di trajectory_ref_raw
+    #   ch 2 -> legge torque_faulted al posto di torque_raw
+    #   ch 3 -> legge joint_states_faulted
     # ------------------------------------------------------------
     bridge_remaps = []
 
-    if FAULT_CHANNEL == 0:
-        bridge_remaps.append(
-            ('/exo_dynamics/tau_ext_theta', '/exo_dynamics/tau_ext_theta_faulted')
-        )
+    if USE_FAULT_INJECTOR:
+        if FAULT_CHANNEL == 0:
+            bridge_remaps.append(
+                ('/exo_dynamics/tau_ext_theta', '/exo_dynamics/tau_ext_theta_faulted')
+            )
 
-    if FAULT_CHANNEL == 1:
-        bridge_remaps.append(
-            ('/trajectory_ref_raw', '/trajectory_ref_faulted')
-        )
+        if FAULT_CHANNEL == 1:
+            bridge_remaps.append(
+                ('/trajectory_ref_raw', '/trajectory_ref_faulted')
+            )
 
-    if FAULT_CHANNEL == 2:
-        bridge_remaps.append(
-            ('/torque_raw', '/torque_faulted')
-        )
+        if FAULT_CHANNEL == 2:
+            bridge_remaps.append(
+                ('/torque_raw', '/torque_faulted')
+            )
 
-    if FAULT_CHANNEL == 3:
-        bridge_remaps.append(
-            ('/joint_states', '/joint_states_faulted')
-        )
+        if FAULT_CHANNEL == 3:
+            bridge_remaps.append(
+                ('/joint_states', '/joint_states_faulted')
+            )
 
-    return LaunchDescription([
+    # ------------------------------------------------------------
+    # Lista nodi
+    # ------------------------------------------------------------
+    nodes = [
 
         # --------------------------------------------------------
         # Robot State Publisher
@@ -237,29 +268,6 @@ def generate_launch_description():
         ),
 
         # --------------------------------------------------------
-        # Fault Injector
-        # --------------------------------------------------------
-        Node(
-            package='exoskeletron_faults',
-            executable='fault_injector',
-            name='fault_injector',
-            output='screen',
-            parameters=[{
-                'channel':          FAULT_CHANNEL,
-                'fault_active':     FAULT_ACTIVE,
-                'fault_type':       FAULT_TYPE,
-                'fault_magnitude':  FAULT_MAGNITUDE,
-                'noise_std':        NOISE_STD,
-                'spike_duration':   SPIKE_DURATION,
-                'target_index':     TARGET_INDEX,
-                'fault_js_field':   FAULT_JS_FIELD,
-                'joint_name':       JOINT_NAME,
-                'publish_rate':     200.0,
-            }],
-            remappings=fault_injector_remaps[FAULT_CHANNEL]
-        ),
-
-        # --------------------------------------------------------
         # Exo Bridge
         # --------------------------------------------------------
         Node(
@@ -268,15 +276,41 @@ def generate_launch_description():
             name='exo_bridge',
             output='screen',
             parameters=[{
-            'publish_rate_hz': 200.0,
-
-            # Valori per testare altre modalità senza innescare accidentalmente altre modalità
-            #'override_tau_limit': 10.0,
-            #'compliant_tau_limit': 10.0,
-            #'compliant_vel_limit': 10.0,
-            #'compliant_acc_limit': 10.0, 
-            'stop_mode': 'hold_only',
-            }],  
+                'publish_rate_hz': 200.0,
+                # 'override_tau_limit': 10.0,
+                # 'compliant_tau_limit': 10.0,
+                # 'compliant_vel_limit': 10.0,
+                # 'compliant_acc_limit': 10.0,
+                'stop_mode': 'hold_only',
+            }],
             remappings=bridge_remaps
         ),
-    ])
+    ]
+
+    # ------------------------------------------------------------
+    # Fault Injector opzionale
+    # ------------------------------------------------------------
+    if USE_FAULT_INJECTOR:
+        nodes.append(
+            Node(
+                package='exoskeletron_faults',
+                executable='fault_injector',
+                name='fault_injector',
+                output='screen',
+                parameters=[{
+                    'channel':          FAULT_CHANNEL,
+                    'fault_active':     FAULT_ACTIVE,
+                    'fault_type':       FAULT_TYPE,
+                    'fault_magnitude':  FAULT_MAGNITUDE,
+                    'noise_std':        NOISE_STD,
+                    'spike_duration':   SPIKE_DURATION,
+                    'target_index':     TARGET_INDEX,
+                    'fault_js_field':   FAULT_JS_FIELD,
+                    'joint_name':       JOINT_NAME,
+                    'publish_rate':     200.0,
+                }],
+                remappings=fault_injector_remaps[FAULT_CHANNEL]
+            )
+        )
+
+    return LaunchDescription(nodes)

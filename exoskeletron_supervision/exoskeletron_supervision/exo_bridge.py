@@ -20,7 +20,7 @@ class ExoBridge(Node):
 
         self.declare_parameter('override_tau_limit', 1.0)
 
-        self.declare_parameter('compliant_tau_limit', 0.3)
+        self.declare_parameter('compliant_tau_limit', 0.6)
         self.declare_parameter('compliant_vel_limit', 1.0)
         self.declare_parameter('compliant_acc_limit', 2.0)
 

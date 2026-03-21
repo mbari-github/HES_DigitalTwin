@@ -123,7 +123,7 @@ class ExoReducedDynamicsWithHand(Node):
         self.declare_parameter('medial_soft_weight', 1.0)
 
         # --- Stima forza CE ---
-        self.declare_parameter('ce_force_enable', True)
+        self.declare_parameter('ce_force_enable', False)
         self.declare_parameter('ce_force_frame', 'frame_CE_end_2')
         self.declare_parameter('ce_force_marker_scale', 0.02)
         self.declare_parameter('ce_force_marker_diameter', 0.01)
@@ -309,13 +309,11 @@ class ExoReducedDynamicsWithHand(Node):
             )
 
         self.pub_js = self.create_publisher(JointState, '/joint_states', 10)
-        self.pub_closed = self.create_publisher(JointState, '/joint_states_closed', 10)
+        #self.pub_closed = self.create_publisher(JointState, '/joint_states_closed', 10)
         self.pub_dbg = self.create_publisher(Float64MultiArray, '/exo_dynamics/debug', 10)
         self.pub_ff_terms = self.create_publisher(Float64MultiArray, '/exo_dynamics/ff_terms', 10)
         self.pub_tau_ext_theta = self.create_publisher(Float64, '/exo_dynamics/tau_ext_theta', 10)
-        self.pub_model_dbg = self.create_publisher(
-            Float64MultiArray, '/exo_dynamics/model_debug', 10
-        )
+        self.pub_model_dbg = self.create_publisher( Float64MultiArray, '/exo_dynamics/model_debug', 10)
 
         if self.ce_force_enable:
             self.pub_ce_force = self.create_publisher(WrenchStamped, '/ce_force', 10)
@@ -921,13 +919,13 @@ class ExoReducedDynamicsWithHand(Node):
         self.pub_js.publish(js)
 
         # --- /joint_states_closed ---
-        js2 = JointState()
-        js2.header.stamp = js.header.stamp
-        js2.name = self.model.names[1:]
-        js2.position = self.q.tolist()
-        js2.velocity = self.dq.tolist()
-        js2.effort = self.tau_full.tolist()
-        self.pub_closed.publish(js2)
+        # js2 = JointState()
+        # js2.header.stamp = js.header.stamp
+        # js2.name = self.model.names[1:]
+        # js2.position = self.q.tolist()
+        # js2.velocity = self.dq.tolist()
+        # js2.effort = self.tau_full.tolist()
+        # self.pub_closed.publish(js2)
 
         # --- /exo_dynamics/debug ---
         dbg = Float64MultiArray()

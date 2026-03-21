@@ -23,7 +23,6 @@ add_library(safety_plugins SHARED
   src/SafeStopMode.cpp
   src/CompliantMode.cpp
   src/TorqueLimitMode.cpp
-  src/SensorDegradedMode.cpp
 )
 
 ament_target_dependencies(safety_plugins
