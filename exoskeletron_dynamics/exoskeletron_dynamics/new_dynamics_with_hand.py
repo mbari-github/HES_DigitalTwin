@@ -50,7 +50,7 @@ class ExoReducedDynamicsWithHand(Node):
         # --- Percorso URDF e tempi ---
         self.declare_parameter(
             'urdf_path',
-            '/home/mbari/ros2_ws/src/exoskeletron_description/urdf/assembly_with_hand.urdf'
+            '/home/mbari/ros2_ws/src/HES_DigitalTwin/exoskeletron_description/urdf/assembly_with_hand.urdf'
         )
         self.declare_parameter('dt', 0.001)
         self.declare_parameter('publish_dt', 0.005)
