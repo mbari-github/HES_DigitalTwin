@@ -1,407 +1,329 @@
+#!/usr/bin/env python3
 import copy
 from typing import Optional
 
 import rclpy
 from rclpy.node import Node
+from rclpy.time import Time
 
-from std_msgs.msg import Float64, Float64MultiArray
-from std_srvs.srv import SetBool
+from std_msgs.msg import Float64, Float64MultiArray, String
+from std_srvs.srv import SetBool, Trigger
 from sensor_msgs.msg import JointState
+
+from exoskeletron_safety_msgs.srv import SetMode
+
+
+CH_TORQUE  = 'torque_raw'
+CH_TRAJ    = 'trajectory_ref_raw'
+CH_TAU_EXT = 'tau_ext_theta'
+CH_JS      = 'joint_states'
+ALL_CHANNELS = [CH_TORQUE, CH_TRAJ, CH_TAU_EXT, CH_JS]
 
 
 class ExoBridge(Node):
     def __init__(self):
         super().__init__('exo_bridge')
 
-        # ---------------------------------------------------------
-        # Parameters
-        # ---------------------------------------------------------
-        self.declare_parameter('publish_rate_hz', 200.0)
+        self.declare_parameter('publish_rate_hz',    200.0)
+        self.declare_parameter('override_tau_limit',   1.0)
+        self.declare_parameter('compliant_tau_limit',  0.6)
+        self.declare_parameter('compliant_vel_limit',  1.0)
+        self.declare_parameter('compliant_acc_limit',  2.0)
+        self.declare_parameter('stop_mode',        'hold_only')
+        self.declare_parameter('watchdog_timeout_sec', 0.5)
+        # Periodo di grazia all'avvio: i watchdog non scattano
+        # finché il sistema non è stabilizzato
+        self.declare_parameter('watchdog_grace_sec',   2.0)
 
-        self.declare_parameter('override_tau_limit', 1.0)
-
-        self.declare_parameter('compliant_tau_limit', 0.6)
-        self.declare_parameter('compliant_vel_limit', 1.0)
-        self.declare_parameter('compliant_acc_limit', 2.0)
-
-        self.declare_parameter('stop_mode', 'hold_only')
-        # stop_mode:
-        # - hold_only
-        # - hold_and_zero_torque
-        # - zero_torque_only
-
-        self.publish_rate_hz = float(self.get_parameter('publish_rate_hz').value)
-
-        self.override_tau_limit = float(self.get_parameter('override_tau_limit').value)
-
+        self.publish_rate_hz     = float(self.get_parameter('publish_rate_hz').value)
+        self.override_tau_limit  = float(self.get_parameter('override_tau_limit').value)
         self.compliant_tau_limit = float(self.get_parameter('compliant_tau_limit').value)
         self.compliant_vel_limit = float(self.get_parameter('compliant_vel_limit').value)
         self.compliant_acc_limit = float(self.get_parameter('compliant_acc_limit').value)
+        self.stop_mode           = str(self.get_parameter('stop_mode').value)
+        self.watchdog_timeout    = float(self.get_parameter('watchdog_timeout_sec').value)
+        self.watchdog_grace      = float(self.get_parameter('watchdog_grace_sec').value)
 
-        self.stop_mode = str(self.get_parameter('stop_mode').value)
-
-        # ---------------------------------------------------------
-        # Internal state
-        # ---------------------------------------------------------
-        self.control_mode = 'nominal'
-        # allowed:
-        # - nominal
-        # - torque_limit
-        # - compliant
-        # - stop
-
-        self.last_joint_state: Optional[JointState] = None
-        self.last_trajectory_ref_in: Optional[Float64MultiArray] = None
-        self.last_torque_in: Optional[Float64] = None
-        self.last_tau_ext: Optional[Float64] = None
-
+        self.control_mode: str           = 'nominal'
         self.theta_hold: Optional[float] = None
 
-        # ---------------------------------------------------------
-        # Subscribers
-        # ---------------------------------------------------------
-        self.create_subscription(
-            JointState,
-            '/joint_states',
-            self.joint_state_callback,
-            10
+        self.last_joint_state:       Optional[JointState]        = None
+        self.last_trajectory_ref_in: Optional[Float64MultiArray] = None
+        self.last_torque_in:         Optional[Float64]           = None
+        self.last_tau_ext:           Optional[Float64]           = None
+
+        # Timestamp ultimo messaggio per canale (None = mai ricevuto)
+        self._last_rx: dict[str, Optional[float]] = {
+            CH_TORQUE:  None,
+            CH_TRAJ:    None,
+            CH_TAU_EXT: None,
+            CH_JS:      None,
+        }
+
+        # Canali già segnalati come morti — evita chiamate ripetute
+        self._dead_channels: set[str] = set()
+
+        # Tempo di avvio — usato per il periodo di grazia
+        self._start_time: float = self.get_clock().now().nanoseconds * 1e-9
+
+        # ── Subscribers ──────────────────────────────────────────────
+        self.create_subscription(JointState,        '/joint_states',               self._cb_js,  10)
+        self.create_subscription(Float64MultiArray, '/trajectory_ref_raw',         self._cb_ref, 10)
+        self.create_subscription(Float64,           '/torque_raw',                 self._cb_tau, 10)
+        self.create_subscription(Float64,           '/exo_dynamics/tau_ext_theta', self._cb_ext, 10)
+
+        # ── Publishers ───────────────────────────────────────────────
+        self.trajectory_ref_pub  = self.create_publisher(Float64MultiArray, '/trajectory_ref',    10)
+        self.torque_pub          = self.create_publisher(Float64,           '/torque',             10)
+        self.bridge_status_pub   = self.create_publisher(Float64MultiArray, '/exo_bridge/status',  10)
+        self.mode_pub            = self.create_publisher(String,            '/exo_bridge/mode',    10)
+
+        # ── Servizio interno ─────────────────────────────────────────
+        self.create_service(SetMode, '/bridge/set_mode', self._cb_set_mode)
+
+        # ── Client verso state machine per safe stop ─────────────────
+        self._safe_stop_client = self.create_client(SetBool, '/safe_stop_request')
+
+        # ── Timer principale (control loop + watchdog) ───────────────
+        self.timer = self.create_timer(1.0 / self.publish_rate_hz, self._control_loop)
+
+        self.get_logger().info(
+            f'ExoBridge started | '
+            f'watchdog_timeout={self.watchdog_timeout:.2f}s | '
+            f'grace={self.watchdog_grace:.2f}s'
         )
 
-        self.create_subscription(
-            Float64MultiArray,
-            '/trajectory_ref_raw',
-            self.trajectory_ref_callback,
-            10
-        )
+    # ── Subscriber callbacks ─────────────────────────────────────────
 
-        self.create_subscription(
-            Float64,
-            '/torque_raw',
-            self.torque_callback,
-            10
-        )
-
-        self.create_subscription(
-            Float64,
-            '/exo_dynamics/tau_ext_theta',
-            self.tau_ext_callback,
-            10
-        )
-
-        # ---------------------------------------------------------
-        # Publishers
-        # ---------------------------------------------------------
-        self.trajectory_ref_pub = self.create_publisher(
-            Float64MultiArray,
-            '/trajectory_ref',
-            10
-        )
-
-        self.torque_pub = self.create_publisher(
-            Float64,
-            '/torque',
-            10
-        )
-
-        self.bridge_status_pub = self.create_publisher(
-            Float64MultiArray,
-            '/exo_bridge/status',
-            10
-        )
-
-        # ---------------------------------------------------------
-        # Services
-        # ---------------------------------------------------------
-        self.create_service(
-            SetBool,
-            '/stop_robot',
-            self.stop_robot_callback
-        )
-
-        self.create_service(
-            SetBool,
-            '/override_control',
-            self.override_control_callback
-        )
-
-        self.create_service(
-            SetBool,
-            '/compliant_control',
-            self.compliant_control_callback
-        )
-
-        # ---------------------------------------------------------
-        # Timer
-        # ---------------------------------------------------------
-        timer_period = 1.0 / self.publish_rate_hz
-        self.timer = self.create_timer(timer_period, self.control_loop)
-
-        self.get_logger().info('ExoBridge started')
-        self.get_logger().info(f'publish_rate_hz = {self.publish_rate_hz}')
-        self.get_logger().info(f'override_tau_limit = {self.override_tau_limit}')
-        self.get_logger().info(f'compliant_tau_limit = {self.compliant_tau_limit}')
-        self.get_logger().info(f'compliant_vel_limit = {self.compliant_vel_limit}')
-        self.get_logger().info(f'compliant_acc_limit = {self.compliant_acc_limit}')
-        self.get_logger().info(f'stop_mode = {self.stop_mode}')
-
-    # ------------------------------------------------------------------
-    # Subscriber callbacks
-    # ------------------------------------------------------------------
-    def joint_state_callback(self, msg: JointState):
+    def _cb_js(self, msg: JointState):
         self.last_joint_state = msg
+        self._touch(CH_JS)
 
-    def trajectory_ref_callback(self, msg: Float64MultiArray):
+    def _cb_ref(self, msg: Float64MultiArray):
         self.last_trajectory_ref_in = msg
+        self._touch(CH_TRAJ)
 
-    def torque_callback(self, msg: Float64):
+    def _cb_tau(self, msg: Float64):
         self.last_torque_in = msg
+        self._touch(CH_TORQUE)
 
-    def tau_ext_callback(self, msg: Float64):
+    def _cb_ext(self, msg: Float64):
         self.last_tau_ext = msg
+        self._touch(CH_TAU_EXT)
 
-    # ------------------------------------------------------------------
-    # Service callbacks
-    # ------------------------------------------------------------------
-    def stop_robot_callback(self, request: SetBool.Request, response: SetBool.Response):
-        if request.data:
-            self.control_mode = 'stop'
-            current_theta = self.get_current_theta()
-            if current_theta is not None:
-                self.theta_hold = current_theta
-                self.get_logger().warn(
-                    f'STOP activated. Holding rev_crank at theta = {self.theta_hold:.6f}'
+    def _touch(self, channel: str):
+        now = self.get_clock().now().nanoseconds * 1e-9
+        self._last_rx[channel] = now
+        # Se il canale era morto e ora è tornato, rimuovilo dalla blacklist
+        if channel in self._dead_channels:
+            self._dead_channels.discard(channel)
+            self.get_logger().info(f'ExoBridge: channel [{channel}] recovered')
+
+    # ── SetMode service ──────────────────────────────────────────────
+
+    def _cb_set_mode(self, request: SetMode.Request, response: SetMode.Response):
+        mode = request.mode.strip().lower()
+        allowed = ('nominal', 'compliant', 'torque_limit', 'stop')
+        if mode not in allowed:
+            response.success = False
+            response.message = f"Unknown mode '{mode}'. Allowed: {allowed}"
+            self.get_logger().error(response.message)
+            return response
+
+        prev = self.control_mode
+        self.control_mode = mode
+
+        if mode == 'stop':
+            theta = self.get_current_theta()
+            self.theta_hold = theta
+            self.get_logger().warn(
+                f'Bridge mode: STOP | theta_hold='
+                f'{theta:.6f}' if theta is not None else 'unavailable'
+            )
+        elif mode == 'nominal':
+            self.theta_hold = None
+            self.get_logger().info(f'Bridge mode: NOMINAL (was {prev})')
+        else:
+            self.get_logger().warn(f'Bridge mode: {mode.upper()} (was {prev})')
+
+        response.success = True
+        response.message = f'Mode set to {mode}'
+        return response
+
+    # ── Control loop ─────────────────────────────────────────────────
+
+    def _control_loop(self):
+        self._check_watchdogs()
+
+        ref = self._safe_trajectory_ref()
+        tau = self._safe_torque()
+        if ref is not None: self.trajectory_ref_pub.publish(ref)
+        if tau is not None: self.torque_pub.publish(tau)
+        self._publish_status()
+        self._publish_mode()
+
+    # ── Watchdog ─────────────────────────────────────────────────────
+
+    def _check_watchdogs(self):
+        now = self.get_clock().now().nanoseconds * 1e-9
+
+        # Periodo di grazia: non controllare finché il sistema non è
+        # stabilizzato (i nodi potrebbero non aver ancora pubblicato nulla)
+        if (now - self._start_time) < self.watchdog_grace:
+            return
+
+        newly_dead = []
+        for ch in ALL_CHANNELS:
+            last = self._last_rx[ch]
+
+            # Mai ricevuto dopo il grace period → canale morto
+            if last is None:
+                if ch not in self._dead_channels:
+                    newly_dead.append((ch, -1.0))
+                    self._dead_channels.add(ch)
+                continue
+
+            age = now - last
+            if age > self.watchdog_timeout:
+                if ch not in self._dead_channels:
+                    newly_dead.append((ch, age))
+                    self._dead_channels.add(ch)
+
+        if not newly_dead:
+            return
+
+        for ch, age in newly_dead:
+            if age < 0:
+                self.get_logger().error(
+                    f'ExoBridge WATCHDOG: channel [{ch}] never received → SAFE_STOP'
                 )
             else:
-                self.theta_hold = None
-                self.get_logger().warn(
-                    'STOP activated, but rev_crank position is unavailable.'
+                self.get_logger().error(
+                    f'ExoBridge WATCHDOG: channel [{ch}] dead | age={age:.3f}s → SAFE_STOP'
                 )
-            response.message = 'Stop activated.'
-        else:
-            self.theta_hold = None
-            self.control_mode = 'nominal'
-            self.get_logger().info('STOP deactivated. Returning to nominal mode.')
-            response.message = 'Stop deactivated.'
 
-        response.success = True
-        return response
+        self._request_safe_stop()
 
-    def override_control_callback(self, request: SetBool.Request, response: SetBool.Response):
-        if request.data:
-            self.control_mode = 'torque_limit'
-            self.get_logger().warn('TORQUE_LIMIT override activated.')
-            response.message = 'Torque limit override activated.'
-        else:
-            self.control_mode = 'nominal'
-            self.get_logger().info('TORQUE_LIMIT override deactivated.')
-            response.message = 'Torque limit override deactivated.'
+    def _request_safe_stop(self):
+        if not self._safe_stop_client.wait_for_service(timeout_sec=0.3):
+            self.get_logger().error(
+                'ExoBridge WATCHDOG: /safe_stop_request not available!'
+            )
+            return
+        req = SetBool.Request()
+        req.data = True
+        future = self._safe_stop_client.call_async(req)
+        future.add_done_callback(self._safe_stop_response_cb)
 
-        response.success = True
-        return response
+    def _safe_stop_response_cb(self, future):
+        try:
+            result = future.result()
+            self.get_logger().info(
+                f'ExoBridge WATCHDOG: safe_stop response | '
+                f'success={result.success} msg={result.message}'
+            )
+        except Exception as e:
+            self.get_logger().error(f'ExoBridge WATCHDOG: safe_stop call failed: {e}')
 
-    def compliant_control_callback(self, request: SetBool.Request, response: SetBool.Response):
-        if request.data:
-            self.control_mode = 'compliant'
-            self.get_logger().warn('COMPLIANT control activated.')
-            response.message = 'Compliant control activated.'
-        else:
-            self.control_mode = 'nominal'
-            self.get_logger().info('COMPLIANT control deactivated.')
-            response.message = 'Compliant control deactivated.'
+    # ── Safe trajectory ──────────────────────────────────────────────
 
-        response.success = True
-        return response
-
-    # ------------------------------------------------------------------
-    # Main loop
-    # ------------------------------------------------------------------
-    def control_loop(self):
-        safe_ref = self.compute_safe_trajectory_ref()
-        safe_tau = self.compute_safe_torque()
-
-        if safe_ref is not None:
-            self.trajectory_ref_pub.publish(safe_ref)
-
-        if safe_tau is not None:
-            self.torque_pub.publish(safe_tau)
-
-        self.publish_status()
-
-    # ------------------------------------------------------------------
-    # Safe trajectory generation
-    # ------------------------------------------------------------------
-    def compute_safe_trajectory_ref(self) -> Optional[Float64MultiArray]:
+    def _safe_trajectory_ref(self) -> Optional[Float64MultiArray]:
         if self.control_mode == 'stop':
-            return self.build_hold_reference()
-
+            return self._hold_reference()
         if self.last_trajectory_ref_in is None:
             return None
-
-        safe_ref = copy.deepcopy(self.last_trajectory_ref_in)
-
-        if len(safe_ref.data) < 3:
-            self.get_logger().warn('Received malformed trajectory_ref_raw')
-            return safe_ref
-
-        theta_ref = float(safe_ref.data[0])
-        theta_dot_ref = float(safe_ref.data[1])
-        theta_ddot_ref = float(safe_ref.data[2])
-
+        ref = copy.deepcopy(self.last_trajectory_ref_in)
+        if len(ref.data) < 3:
+            self.get_logger().warn('Malformed trajectory_ref_raw')
+            return ref
+        theta_ref, theta_dot_ref, theta_ddot_ref = (
+            float(ref.data[0]), float(ref.data[1]), float(ref.data[2])
+        )
         if self.control_mode == 'compliant':
-            theta_dot_ref = self.clamp(
-                theta_dot_ref,
-                -self.compliant_vel_limit,
-                self.compliant_vel_limit
-            )
-            theta_ddot_ref = self.clamp(
-                theta_ddot_ref,
-                -self.compliant_acc_limit,
-                self.compliant_acc_limit
-            )
+            theta_dot_ref  = self.clamp(theta_dot_ref,  -self.compliant_vel_limit, self.compliant_vel_limit)
+            theta_ddot_ref = self.clamp(theta_ddot_ref, -self.compliant_acc_limit, self.compliant_acc_limit)
+        ref.data = [theta_ref, theta_dot_ref, theta_ddot_ref]
+        return ref
 
-        safe_ref.data = [theta_ref, theta_dot_ref, theta_ddot_ref]
-        return safe_ref
+    # ── Safe torque ──────────────────────────────────────────────────
 
-    # ------------------------------------------------------------------
-    # Safe torque generation
-    # ------------------------------------------------------------------
-    def compute_safe_torque(self) -> Optional[Float64]:
+    def _safe_torque(self) -> Optional[Float64]:
         if self.last_torque_in is None:
             return None
-
         tau_in = float(self.last_torque_in.data)
         msg = Float64()
-
         if self.control_mode == 'stop':
-            msg.data = self.compute_stop_torque_value(tau_in)
-            return msg
-
-        if self.control_mode == 'torque_limit':
-            msg.data = self.clamp(
-                tau_in,
-                -self.override_tau_limit,
-                self.override_tau_limit
-            )
-            return msg
-
-        if self.control_mode == 'compliant':
-            msg.data = self.clamp(
-                tau_in,
-                -self.compliant_tau_limit,
-                self.compliant_tau_limit
-            )
-            return msg
-
-        msg.data = tau_in
+            msg.data = self._stop_torque(tau_in)
+        elif self.control_mode == 'torque_limit':
+            msg.data = self.clamp(tau_in, -self.override_tau_limit,  self.override_tau_limit)
+        elif self.control_mode == 'compliant':
+            msg.data = self.clamp(tau_in, -self.compliant_tau_limit, self.compliant_tau_limit)
+        else:
+            msg.data = tau_in
         return msg
 
-    def compute_stop_torque_value(self, tau_in: float) -> float:
-        if self.stop_mode == 'zero_torque_only':
-            return 0.0
-
-        if self.stop_mode == 'hold_only':
-            return tau_in
-
-        # default: hold_and_zero_torque
+    def _stop_torque(self, tau_in: float) -> float:
+        if self.stop_mode == 'zero_torque_only': return 0.0
+        if self.stop_mode == 'hold_only':        return tau_in
         return 0.0
 
-    def build_hold_reference(self) -> Optional[Float64MultiArray]:
-        theta = self.theta_hold
-
+    def _hold_reference(self) -> Optional[Float64MultiArray]:
+        theta = self.theta_hold if self.theta_hold is not None else self.get_current_theta()
         if theta is None:
-            theta = self.get_current_theta()
-
-        if theta is None:
-            if self.last_trajectory_ref_in is not None:
-                return copy.deepcopy(self.last_trajectory_ref_in)
-            return None
-
+            return copy.deepcopy(self.last_trajectory_ref_in) if self.last_trajectory_ref_in else None
         msg = Float64MultiArray()
         msg.data = [float(theta), 0.0, 0.0]
         return msg
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-    def get_rev_crank_index(self) -> Optional[int]:
-        if self.last_joint_state is None:
-            return None
+    # ── Helpers ──────────────────────────────────────────────────────
 
-        try:
-            return self.last_joint_state.name.index('rev_crank')
-        except ValueError:
-            return None
+    def _rev_crank_idx(self) -> Optional[int]:
+        if self.last_joint_state is None: return None
+        try:    return self.last_joint_state.name.index('rev_crank')
+        except ValueError: return None
 
     def get_current_theta(self) -> Optional[float]:
-        idx = self.get_rev_crank_index()
-        if idx is None:
-            return None
-        if len(self.last_joint_state.position) <= idx:
-            return None
+        idx = self._rev_crank_idx()
+        if idx is None or idx >= len(self.last_joint_state.position): return None
         return float(self.last_joint_state.position[idx])
 
     def get_current_theta_dot(self) -> Optional[float]:
-        idx = self.get_rev_crank_index()
-        if idx is None:
-            return None
-        if len(self.last_joint_state.velocity) <= idx:
-            return None
+        idx = self._rev_crank_idx()
+        if idx is None or idx >= len(self.last_joint_state.velocity): return None
         return float(self.last_joint_state.velocity[idx])
 
     @staticmethod
-    def clamp(value: float, vmin: float, vmax: float) -> float:
-        return max(vmin, min(value, vmax))
+    def clamp(v, lo, hi): return max(lo, min(v, hi))
 
-    def control_mode_to_id(self) -> float:
-        if self.control_mode == 'nominal':
-            return 0.0
-        if self.control_mode == 'torque_limit':
-            return 1.0
-        if self.control_mode == 'compliant':
-            return 2.0
-        if self.control_mode == 'stop':
-            return 3.0
-        return -1.0
+    def _mode_id(self) -> float:
+        return {'nominal': 0.0, 'torque_limit': 1.0,
+                'compliant': 2.0, 'stop': 3.0}.get(self.control_mode, -1.0)
 
-    def publish_status(self):
-        msg = Float64MultiArray()
+    def _publish_mode(self):
+        msg = String()
+        msg.data = self.control_mode
+        self.mode_pub.publish(msg)
 
-        theta = self.get_current_theta()
+    def _publish_status(self):
+        theta     = self.get_current_theta()
         theta_dot = self.get_current_theta_dot()
-        tau_in = self.last_torque_in.data if self.last_torque_in is not None else float('nan')
-        tau_ext = self.last_tau_ext.data if self.last_tau_ext is not None else float('nan')
-        theta_hold = self.theta_hold if self.theta_hold is not None else float('nan')
-
-        stop_active = 1.0 if self.control_mode == 'stop' else 0.0
-        override_active = 1.0 if self.control_mode in ('torque_limit', 'compliant') else 0.0
-
-        # Layout:
-        # [0] stop_active
-        # [1] override_active
-        # [2] theta
-        # [3] theta_dot
-        # [4] theta_hold
-        # [5] tau_in
-        # [6] tau_ext
-        # [7] control_mode_id
+        msg = Float64MultiArray()
         msg.data = [
-            stop_active,
-            override_active,
-            theta if theta is not None else float('nan'),
+            1.0 if self.control_mode == 'stop' else 0.0,
+            1.0 if self.control_mode in ('torque_limit', 'compliant') else 0.0,
+            theta     if theta     is not None else float('nan'),
             theta_dot if theta_dot is not None else float('nan'),
-            theta_hold,
-            tau_in,
-            tau_ext,
-            self.control_mode_to_id()
+            self.theta_hold          if self.theta_hold    is not None else float('nan'),
+            self.last_torque_in.data if self.last_torque_in            else float('nan'),
+            self.last_tau_ext.data   if self.last_tau_ext              else float('nan'),
+            self._mode_id(),
         ]
-
         self.bridge_status_pub.publish(msg)
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = ExoBridge()
-
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

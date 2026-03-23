@@ -1,16 +1,22 @@
 from launch import LaunchDescription
+from launch.actions import TimerAction
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 import os
 
 
+
 def generate_launch_description():
 
     description_pkg = get_package_share_directory('exoskeletron_description')
-    urdf_file = os.path.join(description_pkg, 'urdf', 'assembly_with_hand.urdf')
+    launch_pkg      = get_package_share_directory('exoskeletron_bringup')
 
+    urdf_file = os.path.join(description_pkg, 'urdf', 'assembly_with_hand.urdf')
     with open(urdf_file, 'r') as infp:
         robot_description_content = infp.read()
+
+    safety_params_file = os.path.join(launch_pkg, 'config', 'safety_params.yaml')
+    exo_bridge_params_file = os.path.join(launch_pkg, 'config', 'exo_bridge_params.yaml')
 
     # ============================================================
     # CONFIGURAZIONE GENERALE
@@ -25,71 +31,41 @@ def generate_launch_description():
     #   1 -> /trajectory_ref
     #   2 -> /torque
     #   3 -> /joint_states
-    #
-    # Con bridge:
-    #
-    # ch 0:
-    #   /exo_dynamics/tau_ext_theta_raw
-    #       -> /exo_dynamics/tau_ext_theta_faulted
-    #       -> letto da admittance_controller e bridge
-    #
-    # ch 1:
-    #   /trajectory_ref_raw
-    #       -> /trajectory_ref_faulted
-    #       -> letto da exo_bridge
-    #       -> pubblicato finale su /trajectory_ref
-    #
-    # ch 2:
-    #   /torque_raw
-    #       -> /torque_faulted
-    #       -> letto da exo_bridge
-    #       -> pubblicato finale su /torque
-    #
-    # ch 3:
-    #   /joint_states
-    #       -> /joint_states_faulted
-    #       -> letto da controllori, rviz e bridge
-    # ============================================================
 
-    FAULT_CHANNEL       = 0
-    FAULT_TYPE          = 'freeze'
-    FAULT_MAGNITUDE     = 0.0
-    FAULT_ACTIVE        = False
-    NOISE_STD           = 0.1
-    SPIKE_DURATION      = 0.05
-    TARGET_INDEX        = 0
-    FAULT_JS_FIELD      = 'position'
-    JOINT_NAME          = 'rev_crank'
+    FAULT_CHANNEL   = 2
+    FAULT_TYPE      = 'offset'
+    FAULT_MAGNITUDE = 1.0
+    FAULT_ACTIVE    = False
+    NOISE_STD       = 0.1
+    SPIKE_DURATION  = 0.05
+    TARGET_INDEX    = 0
+    FAULT_JS_FIELD  = 'position'
+    JOINT_NAME      = 'rev_crank'
 
     # ------------------------------------------------------------
-    # fault injector remaps
+    # Remaps fault injector
     # ------------------------------------------------------------
     fault_injector_remaps = {
         0: [
-            ('/exo_dynamics/tau_ext_theta', '/exo_dynamics/tau_ext_theta_raw'),
+            ('/exo_dynamics/tau_ext_theta',         '/exo_dynamics/tau_ext_theta_raw'),
             ('/exo_dynamics/tau_ext_theta_faulted', '/exo_dynamics/tau_ext_theta_faulted'),
         ],
         1: [
-            ('/trajectory_ref', '/trajectory_ref_raw'),
-            ('/trajectory_ref_faulted', '/trajectory_ref_faulted'),
+            ('/trajectory_ref',          '/trajectory_ref_raw'),
+            ('/trajectory_ref_faulted',  '/trajectory_ref_faulted'),
         ],
         2: [
-            ('/torque', '/torque_raw'),
-            ('/torque_faulted', '/torque_faulted'),
+            ('/torque',          '/torque_raw'),
+            ('/torque_faulted',  '/torque_faulted'),
         ],
         3: [
-            ('/joint_states', '/joint_states'),
+            ('/joint_states',         '/joint_states'),
             ('/joint_states_faulted', '/joint_states_faulted'),
         ],
     }
 
     # ------------------------------------------------------------
-    # dynamics
-    # - con fault injector e channel 0:
-    #     pubblica /exo_dynamics/tau_ext_theta_raw
-    # - senza fault injector:
-    #     pubblica il topic nominale /exo_dynamics/tau_ext_theta
-    # - legge sempre /torque finale dal bridge
+    # Remaps dynamics
     # ------------------------------------------------------------
     dynamics_remaps = []
     if USE_FAULT_INJECTOR and FAULT_CHANNEL == 0:
@@ -98,22 +74,11 @@ def generate_launch_description():
         )
 
     # ------------------------------------------------------------
-    # admittance controller
-    #
-    # senza injector:
-    #   legge /exo_dynamics/tau_ext_theta
-    #   legge /joint_states
-    #   pubblica /trajectory_ref_raw
-    #
-    # con injector:
-    #   continua a pubblicare /trajectory_ref_raw
-    #   se ch 0 legge /exo_dynamics/tau_ext_theta_faulted
-    #   se ch 3 legge /joint_states_faulted
+    # Remaps admittance controller
     # ------------------------------------------------------------
     admittance_remaps = [
         ('/trajectory_ref', '/trajectory_ref_raw'),
     ]
-
     if USE_FAULT_INJECTOR:
         if FAULT_CHANNEL == 0:
             admittance_remaps.append(
@@ -125,31 +90,18 @@ def generate_launch_description():
             )
 
     # ------------------------------------------------------------
-    # trajectory controller
-    #
-    # senza injector:
-    #   legge /trajectory_ref dal bridge
-    #   legge /joint_states
-    #   pubblica /torque_raw
-    #
-    # con injector:
-    #   legge /trajectory_ref dal bridge
-    #   pubblica /torque_raw
-    #   se ch 3 legge /joint_states_faulted
+    # Remaps trajectory controller
     # ------------------------------------------------------------
     trajectory_remaps = [
         ('/torque', '/torque_raw'),
     ]
-
     if USE_FAULT_INJECTOR and FAULT_CHANNEL == 3:
         trajectory_remaps.append(
             ('/joint_states', '/joint_states_faulted')
         )
 
     # ------------------------------------------------------------
-    # rviz
-    # senza injector: legge /joint_states
-    # con injector e ch 3: legge /joint_states_faulted
+    # Remaps RViz
     # ------------------------------------------------------------
     rviz_remaps = []
     if USE_FAULT_INJECTOR and FAULT_CHANNEL == 3:
@@ -158,52 +110,32 @@ def generate_launch_description():
         )
 
     # ------------------------------------------------------------
-    # exo_bridge
-    #
-    # senza injector:
-    #   legge:
-    #       /trajectory_ref_raw
-    #       /torque_raw
-    #       /joint_states
-    #       /exo_dynamics/tau_ext_theta
-    #
-    # con injector:
-    #   ch 0 -> legge tau_ext_theta_faulted
-    #   ch 1 -> legge trajectory_ref_faulted al posto di trajectory_ref_raw
-    #   ch 2 -> legge torque_faulted al posto di torque_raw
-    #   ch 3 -> legge joint_states_faulted
+    # Remaps exo_bridge
     # ------------------------------------------------------------
     bridge_remaps = []
-
     if USE_FAULT_INJECTOR:
         if FAULT_CHANNEL == 0:
             bridge_remaps.append(
                 ('/exo_dynamics/tau_ext_theta', '/exo_dynamics/tau_ext_theta_faulted')
             )
-
         if FAULT_CHANNEL == 1:
             bridge_remaps.append(
                 ('/trajectory_ref_raw', '/trajectory_ref_faulted')
             )
-
         if FAULT_CHANNEL == 2:
             bridge_remaps.append(
                 ('/torque_raw', '/torque_faulted')
             )
-
         if FAULT_CHANNEL == 3:
             bridge_remaps.append(
                 ('/joint_states', '/joint_states_faulted')
             )
 
-    # ------------------------------------------------------------
-    # Lista nodi
-    # ------------------------------------------------------------
-    nodes = [
+    # ============================================================
+    # NODI — avvio immediato
+    # ============================================================
+    nodes_immediate = [
 
-        # --------------------------------------------------------
-        # Robot State Publisher
-        # --------------------------------------------------------
         Node(
             package='robot_state_publisher',
             executable='robot_state_publisher',
@@ -212,9 +144,6 @@ def generate_launch_description():
             parameters=[{'robot_description': robot_description_content}]
         ),
 
-        # --------------------------------------------------------
-        # Plant
-        # --------------------------------------------------------
         Node(
             package='exoskeletron_dynamics',
             executable='exo_dynamics',
@@ -223,9 +152,6 @@ def generate_launch_description():
             remappings=dynamics_remaps
         ),
 
-        # --------------------------------------------------------
-        # RViz
-        # --------------------------------------------------------
         Node(
             package='rviz2',
             executable='rviz2',
@@ -235,9 +161,6 @@ def generate_launch_description():
             remappings=rviz_remaps
         ),
 
-        # --------------------------------------------------------
-        # Input su /exo_dynamics/external_wrench
-        # --------------------------------------------------------
         Node(
             package='exoskeletron_utils',
             executable='external_wrench_pub',
@@ -245,9 +168,6 @@ def generate_launch_description():
             output='screen',
         ),
 
-        # --------------------------------------------------------
-        # Admittance Controller
-        # --------------------------------------------------------
         Node(
             package='exoskeletron_control',
             executable='admittance_controller',
@@ -256,9 +176,6 @@ def generate_launch_description():
             remappings=admittance_remaps
         ),
 
-        # --------------------------------------------------------
-        # Trajectory Controller
-        # --------------------------------------------------------
         Node(
             package='exoskeletron_control',
             executable='trajectory_controller',
@@ -267,31 +184,38 @@ def generate_launch_description():
             remappings=trajectory_remaps
         ),
 
-        # --------------------------------------------------------
-        # Exo Bridge
-        # --------------------------------------------------------
         Node(
             package='exoskeletron_supervision',
             executable='exo_bridge',
             name='exo_bridge',
             output='screen',
-            parameters=[{
-                'publish_rate_hz': 200.0,
-                # 'override_tau_limit': 10.0,
-                # 'compliant_tau_limit': 10.0,
-                # 'compliant_vel_limit': 10.0,
-                # 'compliant_acc_limit': 10.0,
-                'stop_mode': 'hold_only',
-            }],
+            parameters=[exo_bridge_params_file],
             remappings=bridge_remaps
         ),
     ]
 
-    # ------------------------------------------------------------
-    # Fault Injector opzionale
-    # ------------------------------------------------------------
+    # ============================================================
+    # NODI — avvio ritardato di 5 secondi
+    # Il ritardo serve a garantire che exo_bridge sia già attivo
+    # e stia pubblicando /exo_bridge/status prima che
+    # state_machine_node avvii FaultMonitorMode e inizi il watchdog.
+    # ============================================================
+    nodes_delayed = [
+
+        Node(
+            package='exoskeletron_safety_manager',
+            executable='state_machine_node',
+            name='state_machine',
+            output='screen',
+            parameters=[safety_params_file],
+        ),
+    ]
+
+    # ============================================================
+    # FAULT INJECTOR (opzionale, avvio immediato)
+    # ============================================================
     if USE_FAULT_INJECTOR:
-        nodes.append(
+        nodes_immediate.append(
             Node(
                 package='exoskeletron_faults',
                 executable='fault_injector',
@@ -313,4 +237,12 @@ def generate_launch_description():
             )
         )
 
-    return LaunchDescription(nodes)
+    return LaunchDescription(
+        nodes_immediate
+        + [
+            TimerAction(
+                period=5.0,
+                actions=nodes_delayed,
+            )
+        ]
+    )

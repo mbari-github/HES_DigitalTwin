@@ -18,58 +18,110 @@ void FaultMonitorMode::initialize(const rclcpp::Node::SharedPtr & node)
   message_received_ = false;
   watchdog_triggered_ = false;
 
-  bridge_status_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
-    "/exo_bridge/status",
-    10,
-    std::bind(&FaultMonitorMode::bridge_status_callback, this, std::placeholders::_1));
+  // ---- Dichiara parametri sul nodo host ----
+  auto declare_if_missing = [&](const std::string & name, double default_val) {
+    if (!node_->has_parameter(name)) {
+      node_->declare_parameter(name, default_val);
+    }
+  };
 
-  compliant_client_ = node_->create_client<std_srvs::srv::SetBool>("/compliant_mode_request");
-  torque_limit_client_ = node_->create_client<std_srvs::srv::SetBool>("/torque_limit_request");
-  safe_stop_client_ = node_->create_client<std_srvs::srv::SetBool>("/safe_stop_request");
+  // Soglie ingresso
+  declare_if_missing("fault_monitor.tau_compliant_threshold",          2.0);
+  declare_if_missing("fault_monitor.tau_torque_limit_threshold",       3.0);
+  declare_if_missing("fault_monitor.tau_safe_stop_threshold",          4.0);
+  declare_if_missing("fault_monitor.vel_compliant_threshold",          1.0);
+  declare_if_missing("fault_monitor.vel_torque_limit_threshold",       2.0);
+  declare_if_missing("fault_monitor.vel_safe_stop_threshold",          3.0);
 
-  watchdog_timer_ = node_->create_wall_timer(
-    std::chrono::milliseconds(100),
-    std::bind(&FaultMonitorMode::watchdog_callback, this));
+  // Watchdog
+  declare_if_missing("fault_monitor.status_timeout_seconds",           0.5);
+
+  // Debounce ingresso
+  declare_if_missing("fault_monitor.compliant_count_threshold",        3.0);
+  declare_if_missing("fault_monitor.torque_count_threshold",           3.0);
+  declare_if_missing("fault_monitor.stop_count_threshold",             2.0);
+
+  // Grace period
+  declare_if_missing("fault_monitor.grace_period_seconds",             2.0);
+
+  load_thresholds_from_params();
+
+  // ---- Avvia grace period ----
+  // Durante il grace period i messaggi su /exo_bridge/status vengono
+  // ricevuti ma non valutati. Questo evita che messaggi stale rimasti
+  // in coda dalla condizione di fault precedente causino un SAFE_STOP
+  // immediato appena FaultMonitorMode viene (ri)caricato dopo un reset.
+  grace_period_active_ = true;
+  grace_period_end_ = node_->now() +
+    rclcpp::Duration::from_seconds(grace_period_seconds_);
 
   RCLCPP_INFO(
     node_->get_logger(),
-    "FaultMonitorMode initialized | tau thresholds = [%.3f, %.3f, %.3f] | vel thresholds = [%.3f, %.3f, %.3f] | status timeout = %.3f s",
+    "FaultMonitorMode initialized | "
+    "tau=[%.2f, %.2f, %.2f] vel=[%.2f, %.2f, %.2f] "
+    "timeout=%.2fs | grace_period=%.1fs",
     tau_compliant_threshold_,
     tau_torque_limit_threshold_,
     tau_safe_stop_threshold_,
     vel_compliant_threshold_,
     vel_torque_limit_threshold_,
     vel_safe_stop_threshold_,
-    status_timeout_seconds_);
+    status_timeout_seconds_,
+    grace_period_seconds_);
+
+  // ---- Subscriber e clients ----
+  bridge_status_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
+    "/exo_bridge/status",
+    10,
+    std::bind(&FaultMonitorMode::bridge_status_callback, this, std::placeholders::_1));
+
+  compliant_client_    = node_->create_client<std_srvs::srv::SetBool>("/compliant_mode_request");
+  torque_limit_client_ = node_->create_client<std_srvs::srv::SetBool>("/torque_limit_request");
+  safe_stop_client_    = node_->create_client<std_srvs::srv::SetBool>("/safe_stop_request");
+
+  watchdog_timer_ = node_->create_wall_timer(
+    std::chrono::milliseconds(100),
+    std::bind(&FaultMonitorMode::watchdog_callback, this));
+}
+
+void FaultMonitorMode::load_thresholds_from_params()
+{
+  if (!node_) return;
+
+  tau_compliant_threshold_    = node_->get_parameter("fault_monitor.tau_compliant_threshold").as_double();
+  tau_torque_limit_threshold_ = node_->get_parameter("fault_monitor.tau_torque_limit_threshold").as_double();
+  tau_safe_stop_threshold_    = node_->get_parameter("fault_monitor.tau_safe_stop_threshold").as_double();
+  vel_compliant_threshold_    = node_->get_parameter("fault_monitor.vel_compliant_threshold").as_double();
+  vel_torque_limit_threshold_ = node_->get_parameter("fault_monitor.vel_torque_limit_threshold").as_double();
+  vel_safe_stop_threshold_    = node_->get_parameter("fault_monitor.vel_safe_stop_threshold").as_double();
+  status_timeout_seconds_     = node_->get_parameter("fault_monitor.status_timeout_seconds").as_double();
+  compliant_count_threshold_  = static_cast<int>(
+    node_->get_parameter("fault_monitor.compliant_count_threshold").as_double());
+  torque_count_threshold_     = static_cast<int>(
+    node_->get_parameter("fault_monitor.torque_count_threshold").as_double());
+  stop_count_threshold_       = static_cast<int>(
+    node_->get_parameter("fault_monitor.stop_count_threshold").as_double());
+  grace_period_seconds_       = node_->get_parameter("fault_monitor.grace_period_seconds").as_double();
 }
 
 void FaultMonitorMode::stop()
 {
-  if (node_) {
-    RCLCPP_INFO(node_->get_logger(), "FaultMonitorMode stop");
-  }
+  if (node_) RCLCPP_INFO(node_->get_logger(), "FaultMonitorMode stop");
 }
 
 void FaultMonitorMode::pause()
 {
-  if (node_) {
-    RCLCPP_INFO(node_->get_logger(), "FaultMonitorMode pause");
-  }
+  if (node_) RCLCPP_INFO(node_->get_logger(), "FaultMonitorMode pause");
 }
 
 void FaultMonitorMode::resume()
 {
-  if (node_) {
-    RCLCPP_INFO(node_->get_logger(), "FaultMonitorMode resume");
-  }
+  if (node_) RCLCPP_INFO(node_->get_logger(), "FaultMonitorMode resume");
 }
 
 void FaultMonitorMode::shutdown()
 {
-  if (node_) {
-    RCLCPP_INFO(node_->get_logger(), "FaultMonitorMode shutdown");
-  }
-
+  if (node_) RCLCPP_INFO(node_->get_logger(), "FaultMonitorMode shutdown");
   bridge_status_sub_.reset();
   watchdog_timer_.reset();
   compliant_client_.reset();
@@ -80,62 +132,50 @@ void FaultMonitorMode::shutdown()
 void FaultMonitorMode::set_safety_params(double param)
 {
   tau_safe_stop_threshold_ = param;
-
   if (node_) {
-    RCLCPP_INFO(
-      node_->get_logger(),
-      "FaultMonitorMode safe stop tau threshold set to %.3f",
+    RCLCPP_INFO(node_->get_logger(),
+      "FaultMonitorMode: tau_safe_stop_threshold set to %.3f",
       tau_safe_stop_threshold_);
   }
 }
 
-FaultResponseLevel FaultMonitorMode::evaluate_tau(double tau_in) const
+// ============================================================
+// Valutazione ingresso (escalation)
+// ============================================================
+
+FaultResponseLevel FaultMonitorMode::evaluate_tau_entry(double tau_in) const
 {
   const double abs_tau = std::abs(tau_in);
-
-  if (abs_tau >= tau_safe_stop_threshold_) {
-    return FaultResponseLevel::SAFE_STOP;
-  }
-  if (abs_tau >= tau_torque_limit_threshold_) {
-    return FaultResponseLevel::TORQUE_LIMIT;
-  }
-  if (abs_tau >= tau_compliant_threshold_) {
-    return FaultResponseLevel::COMPLIANT;
-  }
-
+  if (abs_tau >= tau_safe_stop_threshold_)    return FaultResponseLevel::SAFE_STOP;
+  if (abs_tau >= tau_torque_limit_threshold_) return FaultResponseLevel::TORQUE_LIMIT;
+  if (abs_tau >= tau_compliant_threshold_)    return FaultResponseLevel::COMPLIANT;
   return FaultResponseLevel::NOMINAL;
 }
 
-FaultResponseLevel FaultMonitorMode::evaluate_velocity(double theta_dot) const
+FaultResponseLevel FaultMonitorMode::evaluate_velocity_entry(double theta_dot) const
 {
   const double abs_vel = std::abs(theta_dot);
-
-  if (abs_vel >= vel_safe_stop_threshold_) {
-    return FaultResponseLevel::SAFE_STOP;
-  }
-  if (abs_vel >= vel_torque_limit_threshold_) {
-    return FaultResponseLevel::TORQUE_LIMIT;
-  }
-  if (abs_vel >= vel_compliant_threshold_) {
-    return FaultResponseLevel::COMPLIANT;
-  }
-
+  if (abs_vel >= vel_safe_stop_threshold_)    return FaultResponseLevel::SAFE_STOP;
+  if (abs_vel >= vel_torque_limit_threshold_) return FaultResponseLevel::TORQUE_LIMIT;
+  if (abs_vel >= vel_compliant_threshold_)    return FaultResponseLevel::COMPLIANT;
   return FaultResponseLevel::NOMINAL;
 }
 
 FaultResponseLevel FaultMonitorMode::max_level(
-  FaultResponseLevel a,
-  FaultResponseLevel b) const
+  FaultResponseLevel a, FaultResponseLevel b) const
 {
   return (static_cast<int>(a) >= static_cast<int>(b)) ? a : b;
 }
 
 bool FaultMonitorMode::is_more_severe(
-  FaultResponseLevel candidate,
-  FaultResponseLevel current) const
+  FaultResponseLevel candidate, FaultResponseLevel current) const
 {
   return static_cast<int>(candidate) > static_cast<int>(current);
 }
+
+// ============================================================
+// Debounce ingresso
+// ============================================================
 
 void FaultMonitorMode::update_debounce_counters(FaultResponseLevel level)
 {
@@ -145,20 +185,16 @@ void FaultMonitorMode::update_debounce_counters(FaultResponseLevel level)
       torque_counter_ = 0;
       compliant_counter_ = 0;
       break;
-
     case FaultResponseLevel::TORQUE_LIMIT:
       torque_counter_++;
       stop_counter_ = 0;
       compliant_counter_ = 0;
       break;
-
     case FaultResponseLevel::COMPLIANT:
       compliant_counter_++;
       torque_counter_ = 0;
       stop_counter_ = 0;
       break;
-
-    case FaultResponseLevel::NOMINAL:
     default:
       compliant_counter_ = 0;
       torque_counter_ = 0;
@@ -167,31 +203,49 @@ void FaultMonitorMode::update_debounce_counters(FaultResponseLevel level)
   }
 }
 
-FaultResponseLevel FaultMonitorMode::debounced_level() const
+FaultResponseLevel FaultMonitorMode::debounced_entry_level() const
 {
-  if (stop_counter_ >= stop_count_threshold_) {
-    return FaultResponseLevel::SAFE_STOP;
-  }
-  if (torque_counter_ >= torque_count_threshold_) {
-    return FaultResponseLevel::TORQUE_LIMIT;
-  }
-  if (compliant_counter_ >= compliant_count_threshold_) {
-    return FaultResponseLevel::COMPLIANT;
-  }
-
+  if (stop_counter_      >= stop_count_threshold_)      return FaultResponseLevel::SAFE_STOP;
+  if (torque_counter_    >= torque_count_threshold_)    return FaultResponseLevel::TORQUE_LIMIT;
+  if (compliant_counter_ >= compliant_count_threshold_) return FaultResponseLevel::COMPLIANT;
   return FaultResponseLevel::NOMINAL;
 }
+
+// ============================================================
+// Callback status bridge
+// ============================================================
 
 void FaultMonitorMode::bridge_status_callback(
   const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
-  if (!node_) {
+  if (!node_) return;
+
+  if (msg->data.size() < 8) {
+    RCLCPP_WARN(node_->get_logger(),
+      "FaultMonitorMode: /exo_bridge/status malformed (size=%zu)",
+      msg->data.size());
     return;
   }
 
-  if (msg->data.size() < 8) {
-    RCLCPP_WARN(node_->get_logger(), "FaultMonitorMode: /exo_bridge/status malformed");
-    return;
+  // ---- Grace period ----
+  // Ricevi ma non valutare durante il grace period post-inizializzazione.
+  // Questo evita che messaggi stale rimasti in coda dalla condizione di
+  // fault precedente causino un SAFE_STOP immediato dopo il reset.
+  if (grace_period_active_) {
+    if (node_->now() < grace_period_end_) {
+      return;
+    }
+    // Grace period terminato: riprendi la valutazione normale.
+    grace_period_active_ = false;
+    // Reset dei contatori di debounce per evitare che campioni
+    // accumulati durante il grace period influenzino la prima
+    // valutazione reale.
+    compliant_counter_ = 0;
+    torque_counter_ = 0;
+    stop_counter_ = 0;
+    last_requested_level_ = FaultResponseLevel::NOMINAL;
+    RCLCPP_INFO(node_->get_logger(),
+      "FaultMonitorMode: grace period terminato, monitoraggio attivo");
   }
 
   message_received_ = true;
@@ -199,80 +253,76 @@ void FaultMonitorMode::bridge_status_callback(
   last_msg_time_ = node_->now();
 
   const double theta_dot = msg->data[3];
-  const double tau_in = msg->data[5];
+  const double tau_in    = msg->data[5];
 
-  const auto tau_level = evaluate_tau(tau_in);
-  const auto vel_level = evaluate_velocity(theta_dot);
-  const auto instantaneous_level = max_level(tau_level, vel_level);
+  const auto tau_level     = evaluate_tau_entry(tau_in);
+  const auto vel_level     = evaluate_velocity_entry(theta_dot);
+  const auto instantaneous = max_level(tau_level, vel_level);
 
-  update_debounce_counters(instantaneous_level);
+  update_debounce_counters(instantaneous);
+  const auto entry_level = debounced_entry_level();
 
-  const auto final_level = debounced_level();
-
-  if (!is_more_severe(final_level, last_requested_level_)) {
+  if (!is_more_severe(entry_level, last_requested_level_)) {
     return;
   }
 
-  switch (final_level) {
+  // NOTA ARCHITETTURALE:
+  // Il FaultMonitorMode richiede le transizioni di stato alla StateMachine
+  // tramite servizi ROS interni (plugin -> servizio -> nodo che ospita il plugin).
+  // È funzionale ma introduce latenza (una RTT per ogni transizione).
+  // Una soluzione più pulita è passare un std::function<void()> al plugin
+  // durante initialize(), eliminando il roundtrip ROS.
+  // Lasciato come TODO per un refactor futuro che richiede di modificare
+  // l'interfaccia SafetyTools.hpp.
+
+  switch (entry_level) {
     case FaultResponseLevel::SAFE_STOP:
-      RCLCPP_WARN(
-        node_->get_logger(),
-        "FaultMonitorMode: SAFE_STOP requested | tau_in=%.3f theta_dot=%.3f",
+      RCLCPP_ERROR(node_->get_logger(),
+        "FaultMonitorMode: SAFE_STOP | tau=%.3f vel=%.3f",
         tau_in, theta_dot);
       request_safe_stop();
       last_requested_level_ = FaultResponseLevel::SAFE_STOP;
       break;
 
     case FaultResponseLevel::TORQUE_LIMIT:
-      RCLCPP_WARN(
-        node_->get_logger(),
-        "FaultMonitorMode: TORQUE_LIMIT requested | tau_in=%.3f theta_dot=%.3f",
+      RCLCPP_WARN(node_->get_logger(),
+        "FaultMonitorMode: TORQUE_LIMIT | tau=%.3f vel=%.3f",
         tau_in, theta_dot);
       request_torque_limit_mode();
       last_requested_level_ = FaultResponseLevel::TORQUE_LIMIT;
       break;
 
     case FaultResponseLevel::COMPLIANT:
-      RCLCPP_WARN(
-        node_->get_logger(),
-        "FaultMonitorMode: COMPLIANT requested | tau_in=%.3f theta_dot=%.3f",
+      RCLCPP_WARN(node_->get_logger(),
+        "FaultMonitorMode: COMPLIANT | tau=%.3f vel=%.3f",
         tau_in, theta_dot);
       request_compliant_mode();
       last_requested_level_ = FaultResponseLevel::COMPLIANT;
       break;
 
-    case FaultResponseLevel::NOMINAL:
     default:
       break;
   }
 }
 
+// ============================================================
+// Watchdog
+// ============================================================
+
 void FaultMonitorMode::watchdog_callback()
 {
-  if (!node_) {
-    return;
-  }
+  if (!node_ || !message_received_) return;
 
-  if (!message_received_) {
-    return;
-  }
+  // Non attivare il watchdog durante il grace period.
+  if (grace_period_active_) return;
 
   const double elapsed = (node_->now() - last_msg_time_).seconds();
-
-  if (elapsed < status_timeout_seconds_) {
-    return;
-  }
-
-  if (watchdog_triggered_) {
-    return;
-  }
+  if (elapsed < status_timeout_seconds_) return;
+  if (watchdog_triggered_) return;
 
   watchdog_triggered_ = true;
-
-  RCLCPP_ERROR(
-    node_->get_logger(),
-    "FaultMonitorMode watchdog timeout on /exo_bridge/status | elapsed=%.3f s",
-    elapsed);
+  RCLCPP_ERROR(node_->get_logger(),
+    "FaultMonitorMode watchdog: /exo_bridge/status timeout (%.3fs)", elapsed);
 
   if (is_more_severe(FaultResponseLevel::SAFE_STOP, last_requested_level_)) {
     request_safe_stop();
@@ -280,66 +330,68 @@ void FaultMonitorMode::watchdog_callback()
   }
 }
 
+// ============================================================
+// Chiamate servizio
+// ============================================================
+
+bool FaultMonitorMode::call_bool_service(
+  rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr & client,
+  const std::string & service_name,
+  bool value)
+{
+  if (!node_ || !client) {
+    RCLCPP_ERROR(rclcpp::get_logger("FaultMonitorMode"),
+      "call_bool_service: client null per %s", service_name.c_str());
+    return false;
+  }
+
+  if (!client->wait_for_service(std::chrono::milliseconds(200))) {
+    RCLCPP_ERROR(node_->get_logger(),
+      "FaultMonitorMode: servizio %s non disponibile", service_name.c_str());
+    return false;
+  }
+
+  auto req = std::make_shared<std_srvs::srv::SetBool::Request>();
+  req->data = value;
+
+  auto future_cb = [this, service_name](
+    rclcpp::Client<std_srvs::srv::SetBool>::SharedFuture f)
+  {
+    try {
+      auto res = f.get();
+      if (!res->success) {
+        RCLCPP_WARN(node_->get_logger(),
+          "FaultMonitorMode: %s success=false: %s",
+          service_name.c_str(), res->message.c_str());
+      }
+    } catch (const std::exception & e) {
+      RCLCPP_ERROR(node_->get_logger(),
+        "FaultMonitorMode: eccezione risposta %s: %s",
+        service_name.c_str(), e.what());
+    }
+  };
+
+  client->async_send_request(req, future_cb);
+  return true;
+}
+
 void FaultMonitorMode::request_compliant_mode()
 {
-  if (!node_ || !compliant_client_) {
-    return;
-  }
-
-  if (!compliant_client_->wait_for_service(std::chrono::milliseconds(500))) {
-    RCLCPP_WARN(node_->get_logger(), "FaultMonitorMode: /compliant_mode_request service not available");
-    return;
-  }
-
-  auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
-  request->data = true;
-
-  auto future = compliant_client_->async_send_request(request);
-  (void)future;
-
-  RCLCPP_INFO(node_->get_logger(), "FaultMonitorMode: sent /compliant_mode_request");
+  call_bool_service(compliant_client_, "/compliant_mode_request", true);
 }
 
 void FaultMonitorMode::request_torque_limit_mode()
 {
-  if (!node_ || !torque_limit_client_) {
-    return;
-  }
-
-  if (!torque_limit_client_->wait_for_service(std::chrono::milliseconds(500))) {
-    RCLCPP_WARN(node_->get_logger(), "FaultMonitorMode: /torque_limit_request service not available");
-    return;
-  }
-
-  auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
-  request->data = true;
-
-  auto future = torque_limit_client_->async_send_request(request);
-  (void)future;
-
-  RCLCPP_INFO(node_->get_logger(), "FaultMonitorMode: sent /torque_limit_request");
+  call_bool_service(torque_limit_client_, "/torque_limit_request", true);
 }
 
 void FaultMonitorMode::request_safe_stop()
 {
-  if (!node_ || !safe_stop_client_) {
-    return;
-  }
-
-  if (!safe_stop_client_->wait_for_service(std::chrono::milliseconds(500))) {
-    RCLCPP_WARN(node_->get_logger(), "FaultMonitorMode: /safe_stop_request service not available");
-    return;
-  }
-
-  auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
-  request->data = true;
-
-  auto future = safe_stop_client_->async_send_request(request);
-  (void)future;
-
-  RCLCPP_INFO(node_->get_logger(), "FaultMonitorMode: sent /safe_stop_request");
+  call_bool_service(safe_stop_client_, "/safe_stop_request", true);
 }
 
 }  // namespace functional_safety
 
-PLUGINLIB_EXPORT_CLASS(functional_safety::FaultMonitorMode, functional_safety::SafetyTools)
+PLUGINLIB_EXPORT_CLASS(
+  functional_safety::FaultMonitorMode,
+  functional_safety::SafetyTools)

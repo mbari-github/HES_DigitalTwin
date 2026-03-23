@@ -1,0 +1,37 @@
+state_machine:
+  ros__parameters:
+    # ── Soglie coppia — attivazione [Nm] ────────────────────────────
+    fault_monitor.tau_compliant_threshold:    2.0
+    fault_monitor.tau_torque_limit_threshold: 3.0
+    fault_monitor.tau_safe_stop_threshold:    4.0
+
+    # ── Soglie velocità — attivazione [rad/s] ───────────────────────
+    fault_monitor.vel_compliant_threshold:    1.0
+    fault_monitor.vel_torque_limit_threshold: 2.0
+    fault_monitor.vel_safe_stop_threshold:    3.0
+
+    # ── Soglie coppia — uscita/downgrade [Nm] ───────────────────────
+    fault_monitor.tau_compliant_exit:         1.5
+    fault_monitor.tau_torque_limit_exit:      2.5
+
+    # ── Soglie velocità — uscita/downgrade [rad/s] ──────────────────
+    fault_monitor.vel_compliant_exit:         0.8
+    fault_monitor.vel_torque_limit_exit:      1.5
+
+    # ── Watchdog su /exo_bridge/status [s] ──────────────────────────
+    fault_monitor.status_timeout_seconds:     0.75
+
+    # ── Periodo di grazia all'avvio [s] ─────────────────────────────
+    fault_monitor.grace_period_seconds:       4.0
+
+    # ── Debounce escalation ──────────────────────────────────────────
+    fault_monitor.compliant_count_threshold:  3.0
+    fault_monitor.torque_count_threshold:     3.0
+    fault_monitor.stop_count_threshold:       2.0
+
+    # ── Debounce downgrade ───────────────────────────────────────────
+    # 2000 campioni @ 200Hz = 10s di segnale pulito per fare downgrade
+    fault_monitor.downgrade_count_threshold:  2000
+    # Peso dei campioni negativi: 1 negativo annulla N positivi
+    # Con K=5: serve il 83% di campioni positivi per avanzare
+    fault_monitor.downgrade_negative_weight:  5

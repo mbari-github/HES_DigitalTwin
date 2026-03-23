@@ -2,35 +2,27 @@
 #define EXOSKELETRON_SAFETY_MANAGER_TORQUE_LIMIT_MODE_HPP
 
 #include "exoskeletron_safety_manager/SafetyTools.hpp"
-
-#include <rclcpp/rclcpp.hpp>
-#include <std_srvs/srv/set_bool.hpp>
+#include "exoskeletron_safety_manager/BridgeModeClient.hpp"
 
 namespace functional_safety
 {
-
-class TorqueLimitMode : public SafetyTools
+class TorqueLimitMode : public SafetyTools, protected BridgeModeClient
 {
 public:
   TorqueLimitMode() = default;
   ~TorqueLimitMode() override = default;
 
-  void initialize(const rclcpp::Node::SharedPtr & node) override;
-  void stop() override;
-  void pause() override;
-  void resume() override;
-  void shutdown() override;
-  void set_safety_params(double param) override;
-
-private:
-  void call_override_service(bool enable);
-
-private:
-  rclcpp::Node::SharedPtr node_;
-  rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr override_client_;
-  double param_{0.0};
+  void initialize(const rclcpp::Node::SharedPtr & node) override
+  {
+    init_bridge_client(node);
+    RCLCPP_INFO(node_->get_logger(), "TorqueLimitMode initialized");
+    request_mode("torque_limit");
+  }
+  void stop()     override { request_mode("torque_limit"); }
+  void pause()    override {}
+  void resume()   override { request_mode("torque_limit"); }
+  void shutdown() override { request_mode("nominal"); }
+  void set_safety_params(double) override {}
 };
-
-}  
-
-#endif  
+}
+#endif

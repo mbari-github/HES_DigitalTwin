@@ -1,0 +1,27 @@
+exo_bridge:
+  ros__parameters:
+    # ── Rate del loop principale [Hz] ──────────────────────────────
+    publish_rate_hz:      200.0
+
+    # ── Limiti coppia per modalità sicure [Nm] ──────────────────────
+    override_tau_limit:   1.0
+    compliant_tau_limit:  0.73
+
+    # ── Limiti cinematici per modalità compliant ────────────────────
+    compliant_vel_limit:  1.0   # [rad/s]
+    compliant_acc_limit:  2.0   # [rad/s²]
+
+    # ── Comportamento in STOP ───────────────────────────────────────
+    # hold_only          -> mantiene la posizione, passa tau invariata
+    # zero_torque_only   -> azzera la coppia
+    # hold_and_zero_torque -> mantiene posizione e azzera coppia
+    stop_mode: 'hold_only'
+
+    # ── Watchdog sui canali in ingresso [s] ────────────────────────
+    # Se un canale non riceve messaggi entro questo tempo -> SAFE_STOP
+    watchdog_timeout_sec: 0.5
+
+    # ── Periodo di grazia all'avvio [s] ────────────────────────────
+    # I watchdog non scattano finché il sistema non è stabilizzato.
+    # Deve essere >= al tempo di avvio del nodo più lento.
+    watchdog_grace_sec:   2.0

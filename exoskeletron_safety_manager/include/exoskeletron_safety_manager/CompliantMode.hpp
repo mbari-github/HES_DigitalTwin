@@ -2,35 +2,27 @@
 #define EXOSKELETRON_SAFETY_MANAGER_COMPLIANT_MODE_HPP
 
 #include "exoskeletron_safety_manager/SafetyTools.hpp"
-
-#include <rclcpp/rclcpp.hpp>
-#include <std_srvs/srv/set_bool.hpp>
+#include "exoskeletron_safety_manager/BridgeModeClient.hpp"
 
 namespace functional_safety
 {
-
-class CompliantMode : public SafetyTools
+class CompliantMode : public SafetyTools, protected BridgeModeClient
 {
 public:
   CompliantMode() = default;
   ~CompliantMode() override = default;
 
-  void initialize(const rclcpp::Node::SharedPtr & node) override;
-  void stop() override;
-  void pause() override;
-  void resume() override;
-  void shutdown() override;
-  void set_safety_params(double param) override;
-
-private:
-  void call_compliant_service(bool enable);
-
-private:
-  rclcpp::Node::SharedPtr node_;
-  rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr compliant_client_;
-  double param_{0.0};
+  void initialize(const rclcpp::Node::SharedPtr & node) override
+  {
+    init_bridge_client(node);
+    RCLCPP_INFO(node_->get_logger(), "CompliantMode initialized");
+    request_mode("compliant");
+  }
+  void stop()     override { request_mode("compliant"); }
+  void pause()    override {}
+  void resume()   override { request_mode("compliant"); }
+  void shutdown() override { request_mode("nominal"); }
+  void set_safety_params(double) override {}
 };
-
-}  
-
-#endif  
+}
+#endif
