@@ -4,10 +4,9 @@ from typing import Optional
 
 import rclpy
 from rclpy.node import Node
-from rclpy.time import Time
 
-from std_msgs.msg import Float64, Float64MultiArray, String
-from std_srvs.srv import SetBool, Trigger
+from std_msgs.msg import Float64, Float64MultiArray, String, Bool
+from std_srvs.srv import SetBool
 from sensor_msgs.msg import JointState
 
 from exoskeletron_safety_msgs.srv import SetMode
@@ -24,16 +23,15 @@ class ExoBridge(Node):
     def __init__(self):
         super().__init__('exo_bridge')
 
-        self.declare_parameter('publish_rate_hz',    200.0)
-        self.declare_parameter('override_tau_limit',   1.0)
-        self.declare_parameter('compliant_tau_limit',  0.6)
-        self.declare_parameter('compliant_vel_limit',  1.0)
-        self.declare_parameter('compliant_acc_limit',  2.0)
-        self.declare_parameter('stop_mode',        'hold_only')
-        self.declare_parameter('watchdog_timeout_sec', 0.5)
-        # Periodo di grazia all'avvio: i watchdog non scattano
-        # finché il sistema non è stabilizzato
-        self.declare_parameter('watchdog_grace_sec',   2.0)
+        self.declare_parameter('publish_rate_hz',     200.0)
+        self.declare_parameter('override_tau_limit',    1.0)
+        self.declare_parameter('compliant_tau_limit',   0.6)
+        self.declare_parameter('compliant_vel_limit',   1.0)
+        self.declare_parameter('compliant_acc_limit',   2.0)
+        self.declare_parameter('stop_mode',         'zero_torque_only')
+        self.declare_parameter('hold_tau_limit',        1.0)
+        self.declare_parameter('watchdog_timeout_sec',  0.5)
+        self.declare_parameter('watchdog_grace_sec',    2.0)
 
         self.publish_rate_hz     = float(self.get_parameter('publish_rate_hz').value)
         self.override_tau_limit  = float(self.get_parameter('override_tau_limit').value)
@@ -41,29 +39,28 @@ class ExoBridge(Node):
         self.compliant_vel_limit = float(self.get_parameter('compliant_vel_limit').value)
         self.compliant_acc_limit = float(self.get_parameter('compliant_acc_limit').value)
         self.stop_mode           = str(self.get_parameter('stop_mode').value)
+        self.hold_tau_limit      = float(self.get_parameter('hold_tau_limit').value)
         self.watchdog_timeout    = float(self.get_parameter('watchdog_timeout_sec').value)
         self.watchdog_grace      = float(self.get_parameter('watchdog_grace_sec').value)
 
-        self.control_mode: str           = 'nominal'
-        self.theta_hold: Optional[float] = None
+        self.control_mode: str            = 'nominal'
+        self.theta_hold: Optional[float]  = None
 
         self.last_joint_state:       Optional[JointState]        = None
         self.last_trajectory_ref_in: Optional[Float64MultiArray] = None
         self.last_torque_in:         Optional[Float64]           = None
         self.last_tau_ext:           Optional[Float64]           = None
 
-        # Timestamp ultimo messaggio per canale (None = mai ricevuto)
+        # FIX B: tau effettivamente inviata al plant nell'ultimo ciclo
+        self.tau_out_last: float = 0.0
+
         self._last_rx: dict[str, Optional[float]] = {
             CH_TORQUE:  None,
             CH_TRAJ:    None,
             CH_TAU_EXT: None,
             CH_JS:      None,
         }
-
-        # Canali già segnalati come morti — evita chiamate ripetute
         self._dead_channels: set[str] = set()
-
-        # Tempo di avvio — usato per il periodo di grazia
         self._start_time: float = self.get_clock().now().nanoseconds * 1e-9
 
         # ── Subscribers ──────────────────────────────────────────────
@@ -77,18 +74,21 @@ class ExoBridge(Node):
         self.torque_pub          = self.create_publisher(Float64,           '/torque',             10)
         self.bridge_status_pub   = self.create_publisher(Float64MultiArray, '/exo_bridge/status',  10)
         self.mode_pub            = self.create_publisher(String,            '/exo_bridge/mode',    10)
+        self.admittance_freeze_pub = self.create_publisher(Bool,            '/admittance/freeze',  10)
 
-        # ── Servizio interno ─────────────────────────────────────────
+        # ── Servizi ───────────────────────────────────────────────────
         self.create_service(SetMode, '/bridge/set_mode', self._cb_set_mode)
 
         # ── Client verso state machine per safe stop ─────────────────
         self._safe_stop_client = self.create_client(SetBool, '/safe_stop_request')
 
-        # ── Timer principale (control loop + watchdog) ───────────────
+        # ── Timer principale ─────────────────────────────────────────
         self.timer = self.create_timer(1.0 / self.publish_rate_hz, self._control_loop)
 
         self.get_logger().info(
             f'ExoBridge started | '
+            f'stop_mode={self.stop_mode} | '
+            f'hold_tau_limit={self.hold_tau_limit:.3f} Nm | '
             f'watchdog_timeout={self.watchdog_timeout:.2f}s | '
             f'grace={self.watchdog_grace:.2f}s'
         )
@@ -114,7 +114,6 @@ class ExoBridge(Node):
     def _touch(self, channel: str):
         now = self.get_clock().now().nanoseconds * 1e-9
         self._last_rx[channel] = now
-        # Se il canale era morto e ora è tornato, rimuovilo dalla blacklist
         if channel in self._dead_channels:
             self._dead_channels.discard(channel)
             self.get_logger().info(f'ExoBridge: channel [{channel}] recovered')
@@ -137,12 +136,20 @@ class ExoBridge(Node):
             theta = self.get_current_theta()
             self.theta_hold = theta
             self.get_logger().warn(
-                f'Bridge mode: STOP | theta_hold='
-                f'{theta:.6f}' if theta is not None else 'unavailable'
+                f'Bridge mode: STOP | stop_mode={self.stop_mode} | theta_hold='
+                + (f'{theta:.6f}' if theta is not None else 'unavailable')
             )
+            freeze_msg = Bool()
+            freeze_msg.data = True
+            self.admittance_freeze_pub.publish(freeze_msg)
+
         elif mode == 'nominal':
             self.theta_hold = None
             self.get_logger().info(f'Bridge mode: NOMINAL (was {prev})')
+            freeze_msg = Bool()
+            freeze_msg.data = False
+            self.admittance_freeze_pub.publish(freeze_msg)
+
         else:
             self.get_logger().warn(f'Bridge mode: {mode.upper()} (was {prev})')
 
@@ -158,7 +165,10 @@ class ExoBridge(Node):
         ref = self._safe_trajectory_ref()
         tau = self._safe_torque()
         if ref is not None: self.trajectory_ref_pub.publish(ref)
-        if tau is not None: self.torque_pub.publish(tau)
+        if tau is not None:
+            # FIX B: salva la tau effettivamente inviata al plant
+            self.tau_out_last = tau.data
+            self.torque_pub.publish(tau)
         self._publish_status()
         self._publish_mode()
 
@@ -166,23 +176,17 @@ class ExoBridge(Node):
 
     def _check_watchdogs(self):
         now = self.get_clock().now().nanoseconds * 1e-9
-
-        # Periodo di grazia: non controllare finché il sistema non è
-        # stabilizzato (i nodi potrebbero non aver ancora pubblicato nulla)
         if (now - self._start_time) < self.watchdog_grace:
             return
 
         newly_dead = []
         for ch in ALL_CHANNELS:
             last = self._last_rx[ch]
-
-            # Mai ricevuto dopo il grace period → canale morto
             if last is None:
                 if ch not in self._dead_channels:
                     newly_dead.append((ch, -1.0))
                     self._dead_channels.add(ch)
                 continue
-
             age = now - last
             if age > self.watchdog_timeout:
                 if ch not in self._dead_channels:
@@ -255,7 +259,7 @@ class ExoBridge(Node):
         if self.control_mode == 'stop':
             msg.data = self._stop_torque(tau_in)
         elif self.control_mode == 'torque_limit':
-            msg.data = self.clamp(tau_in, -self.override_tau_limit,  self.override_tau_limit)
+            msg.data = self.clamp(tau_in, -self.override_tau_limit, self.override_tau_limit)
         elif self.control_mode == 'compliant':
             msg.data = self.clamp(tau_in, -self.compliant_tau_limit, self.compliant_tau_limit)
         else:
@@ -263,8 +267,12 @@ class ExoBridge(Node):
         return msg
 
     def _stop_torque(self, tau_in: float) -> float:
-        if self.stop_mode == 'zero_torque_only': return 0.0
-        if self.stop_mode == 'hold_only':        return tau_in
+        if self.stop_mode == 'zero_torque_only':
+            return 0.0
+        if self.stop_mode == 'hold_only':
+            # FIX Bug #1: clamp a hold_tau_limit, non pass-through illimitato
+            return self.clamp(tau_in, -self.hold_tau_limit, self.hold_tau_limit)
+        # hold_and_zero_torque o valore non riconosciuto → sicuro
         return 0.0
 
     def _hold_reference(self) -> Optional[Float64MultiArray]:
@@ -278,22 +286,28 @@ class ExoBridge(Node):
     # ── Helpers ──────────────────────────────────────────────────────
 
     def _rev_crank_idx(self) -> Optional[int]:
-        if self.last_joint_state is None: return None
-        try:    return self.last_joint_state.name.index('rev_crank')
-        except ValueError: return None
+        if self.last_joint_state is None:
+            return None
+        try:
+            return self.last_joint_state.name.index('rev_crank')
+        except ValueError:
+            return None
 
     def get_current_theta(self) -> Optional[float]:
         idx = self._rev_crank_idx()
-        if idx is None or idx >= len(self.last_joint_state.position): return None
+        if idx is None or idx >= len(self.last_joint_state.position):
+            return None
         return float(self.last_joint_state.position[idx])
 
     def get_current_theta_dot(self) -> Optional[float]:
         idx = self._rev_crank_idx()
-        if idx is None or idx >= len(self.last_joint_state.velocity): return None
+        if idx is None or idx >= len(self.last_joint_state.velocity):
+            return None
         return float(self.last_joint_state.velocity[idx])
 
     @staticmethod
-    def clamp(v, lo, hi): return max(lo, min(v, hi))
+    def clamp(v, lo, hi):
+        return max(lo, min(v, hi))
 
     def _mode_id(self) -> float:
         return {'nominal': 0.0, 'torque_limit': 1.0,
@@ -313,9 +327,14 @@ class ExoBridge(Node):
             1.0 if self.control_mode in ('torque_limit', 'compliant') else 0.0,
             theta     if theta     is not None else float('nan'),
             theta_dot if theta_dot is not None else float('nan'),
-            self.theta_hold          if self.theta_hold    is not None else float('nan'),
-            self.last_torque_in.data if self.last_torque_in            else float('nan'),
-            self.last_tau_ext.data   if self.last_tau_ext              else float('nan'),
+            self.theta_hold if self.theta_hold is not None else float('nan'),
+            # FIX A: pubblica tau_out_last (tau effettivamente al plant),
+            # non last_torque_in (tau grezza in ingresso al bridge).
+            # Il FaultMonitorMode legge data[5] per valutare l'escalation:
+            # deve vedere la tau reale, non quella potenzialmente divergente
+            # prodotta da un controller con theta congelato.
+            self.tau_out_last,
+            self.last_tau_ext.data if self.last_tau_ext else float('nan'),
             self._mode_id(),
         ]
         self.bridge_status_pub.publish(msg)

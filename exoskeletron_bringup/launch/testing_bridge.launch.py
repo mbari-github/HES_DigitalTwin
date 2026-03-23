@@ -17,6 +17,8 @@ def generate_launch_description():
 
     safety_params_file = os.path.join(launch_pkg, 'config', 'safety_params.yaml')
     exo_bridge_params_file = os.path.join(launch_pkg, 'config', 'exo_bridge_params.yaml')
+    observer_params_file = os.path.join(launch_pkg, 'config', 'observer_params.yaml')
+    dynamics_params_file = os.path.join(launch_pkg, 'config', 'dynamics_params.yaml')
 
     # ============================================================
     # CONFIGURAZIONE GENERALE
@@ -32,8 +34,8 @@ def generate_launch_description():
     #   2 -> /torque
     #   3 -> /joint_states
 
-    FAULT_CHANNEL   = 2
-    FAULT_TYPE      = 'offset'
+    FAULT_CHANNEL   = 3
+    FAULT_TYPE      = 'freeze'
     FAULT_MAGNITUDE = 1.0
     FAULT_ACTIVE    = False
     NOISE_STD       = 0.1
@@ -149,6 +151,7 @@ def generate_launch_description():
             executable='exo_dynamics',
             name='dynamics',
             output='screen',
+            parameters=[dynamics_params_file],
             remappings=dynamics_remaps
         ),
 
@@ -192,13 +195,18 @@ def generate_launch_description():
             parameters=[exo_bridge_params_file],
             remappings=bridge_remaps
         ),
+
+        Node(
+            package='exoskeletron_dynamics',
+            executable='ekf_observer',
+            name='ekf_observer',
+            output='screen',
+            parameters=[observer_params_file]
+        ),
     ]
 
     # ============================================================
     # NODI — avvio ritardato di 5 secondi
-    # Il ritardo serve a garantire che exo_bridge sia già attivo
-    # e stia pubblicando /exo_bridge/status prima che
-    # state_machine_node avvii FaultMonitorMode e inizi il watchdog.
     # ============================================================
     nodes_delayed = [
 

@@ -1,0 +1,42 @@
+dynamics:
+  ros__parameters:
+    # ── Attrito sul DOF ridotto (theta = rev_crank) ─────────────────
+    #
+    # Modello:
+    #   tau_fric = fric_visc * theta_dot
+    #              + fric_coul * tanh(theta_dot / fric_eps)
+    #   tau_damp = damping_theta * theta_dot
+    #
+    # Per un sistema "dominato dall'attrito" che rimane fermo sotto gravità:
+    #
+    #   fric_coul deve essere > |g_proj_max| atteso nella posa peggiore.
+    #   g_proj tipico su questo meccanismo è ~0.3–0.8 Nm a seconda
+    #   della configurazione. Portarlo a 2.0 Nm garantisce un margine
+    #   ampio rispetto alla coppia gravitazionale.
+    #
+    #   fric_eps piccolo (0.005) rende il tanh quasi un segno:
+    #   l'attrito coulombiano è pieno già a ~0.005 rad/s (≈ 0.3°/s),
+    #   comportandosi effettivamente da attrito statico.
+    #
+    #   fric_visc alto smorza il moto una volta che inizia,
+    #   impedendo oscillazioni residue dopo lo stop.
+    #
+    #   damping_theta aggiunge smorzamento lineare puro, utile
+    #   per attenuare velocemente i transienti senza modificare
+    #   il comportamento a regime.
+    #
+    # Valori precedenti (riferimento):
+    #   fric_visc: 0.3   fric_coul: 0.3   fric_eps: 0.01   damping_theta: 0.0
+    #
+    fric_visc:      2.0    # [Nm·s/rad]  era 0.3  — smorzamento viscoso
+    fric_coul:      2.0    # [Nm]        era 0.3  — attrito statico/coulombiano
+    fric_eps:       0.005  # [rad/s]     era 0.01 — soglia velocità per tanh
+    damping_theta:  1.0    # [Nm·s/rad]  era 0.0  — smorzamento addizionale
+
+    # ── Inertia motore ──────────────────────────────────────────────
+    # Invariata — non influisce sul comportamento a regime
+    motor_inertia:  0.1
+
+    # ── Limiti cinematici ───────────────────────────────────────────
+    max_theta_dot:  10.0
+    max_theta_ddot: 400.0

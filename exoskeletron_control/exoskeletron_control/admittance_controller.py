@@ -35,42 +35,37 @@ direttamente dall'inner loop (trajectory_controller.py).
 Schema a blocchi
 ----------------
   /exo_dynamics/tau_ext_theta  →  [Modello M-D-K]  →  /trajectory_ref
-  /joint_states                →  (init θ_v)
+  /joint_states                →  (init θ_v e resume da freeze)
+  /admittance/freeze           →  (congela/sblocca l'integrazione)
 
 Topics
 ------
-  Sub:  /exo_dynamics/tau_ext_theta   std_msgs/Float64      forza utente proiettata su theta
-        /joint_states                 sensor_msgs/JointState (per inizializzazione θ_v)
+  Sub:  /exo_dynamics/tau_ext_theta   std_msgs/Float64
+        /joint_states                 sensor_msgs/JointState
+        /admittance/freeze            std_msgs/Bool
   Pub:  /trajectory_ref               std_msgs/Float64MultiArray  [θ_ref, θ̇_ref, θ̈_ref]
-        /admittance/debug             std_msgs/Float64MultiArray  (diagnostica)
+        /admittance/debug             std_msgs/Float64MultiArray
 
 Parametri ROS2
 --------------
-  joint_name     (str,   default 'rev_crank')  joint da cui leggere theta iniziale
-  M_virt         (float, default 0.5)   [Nm*s²/rad]  inerzia virtuale
-  D_virt         (float, default 5.0)   [Nm*s/rad]   smorzamento virtuale
-  K_virt         (float, default 2.0)   [Nm/rad]     rigidezza virtuale
-  theta_eq       (float, default 0.0)   [rad]        posizione di equilibrio della molla
-  force_deadband (float, default 0.1)   [Nm]         soglia sotto cui tau_ext_theta è zero
-  theta_ref_min  (float, default -2.0)  [rad]        clamp inferiore su theta_ref
-  theta_ref_max  (float, default  2.0)  [rad]        clamp superiore su theta_ref
-  theta_dot_max  (float, default  5.0)  [rad/s]      saturazione velocità virtuale
-  publish_rate   (float, default 200.0) [Hz]         frequenza del loop di controllo
-  init_from_js   (bool,  default True)              inizializza θ_v da /joint_states
-
-Note sul tuning
----------------
-  - Aumentare D_virt per smorzare oscillazioni del riferimento
-  - Aumentare K_virt per avere un comportamento più "rigido" (torna a theta_eq)
-  - Ridurre M_virt per una risposta più reattiva alla forza utente
-  - force_deadband filtra il rumore di stima su tau_ext_theta
+  joint_name     (str,   default 'rev_crank')
+  M_virt         (float, default 0.5)
+  D_virt         (float, default 5.0)
+  K_virt         (float, default 2.0)
+  theta_eq       (float, default 0.0)
+  force_deadband (float, default 0.1)
+  theta_ref_min  (float, default -2.0)
+  theta_ref_max  (float, default  2.0)
+  theta_dot_max  (float, default  5.0)
+  publish_rate   (float, default 200.0)
+  init_from_js   (bool,  default True)
 """
 
+import numpy as np
 import rclpy
 from rclpy.node import Node
-import numpy as np
 
-from std_msgs.msg import Float64, Float64MultiArray
+from std_msgs.msg import Float64, Float64MultiArray, Bool
 from sensor_msgs.msg import JointState
 
 
@@ -79,9 +74,6 @@ class AdmittanceController(Node):
     def __init__(self):
         super().__init__('admittance_controller')
 
-        # ============================================================
-        # PARAMETRI
-        # ============================================================
         self.declare_parameter('joint_name',     'rev_crank')
         self.declare_parameter('M_virt',          0.5)
         self.declare_parameter('D_virt',          5.0)
@@ -94,44 +86,49 @@ class AdmittanceController(Node):
         self.declare_parameter('publish_rate',  200.0)
         self.declare_parameter('init_from_js',   True)
 
-        self.joint_name   = str(self.get_parameter('joint_name').value)
-        publish_rate      = float(self.get_parameter('publish_rate').value)
+        publish_rate    = float(self.get_parameter('publish_rate').value)
+        self.joint_name = str(self.get_parameter('joint_name').value)
         self.init_from_js = bool(self.get_parameter('init_from_js').value)
 
-        # ============================================================
-        # STATO VIRTUALE
-        # ============================================================
-        self.theta_v      = 0.0   # posizione virtuale  → theta_ref
-        self.theta_dot_v  = 0.0   # velocità virtuale   → theta_dot_ref
-        self.theta_ddot_v = 0.0   # accelerazione virtuale → theta_ddot_ref
+        # Stato interno modello virtuale
+        self.theta_v      = 0.0
+        self.theta_dot_v  = 0.0
+        self.theta_ddot_v = 0.0
 
-        # Flag inizializzazione: se init_from_js=True aspetta il primo /joint_states
+        # Inizializzazione da joint_states
         self._initialized = not self.init_from_js
 
-        # Ingresso: forza utente proiettata su theta (scalare, già in [Nm])
-        self.tau_ext_theta = 0.0
+        # FIX Bug #3/#4: stato di freeze
+        # True  → l'integrazione è sospesa, theta_v e theta_dot_v sono congelati
+        # False → funzionamento normale
+        self._frozen = False
+
+        # Ultima posizione reale nota (usata per resettare theta_v al resume)
+        self._last_real_theta: float | None = None
+
+        self.tau_ext_theta  = 0.0
         self.force_received = False
 
-        # dt del loop di controllo
         self._dt = 1.0 / publish_rate
 
-        # ============================================================
-        # ROS I/O
-        # ============================================================
-
-        # Forza utente proiettata su theta: input diretto al modello M-D-K
+        # ── Subscribers ──────────────────────────────────────────────
         self.sub_force = self.create_subscription(
             Float64,
             '/exo_dynamics/tau_ext_theta',
             self._force_cb,
             10
         )
-
-        # Joint states: solo per inizializzare theta_v alla posizione attuale
         self.sub_js = self.create_subscription(
             JointState,
             '/joint_states',
             self._js_cb,
+            10
+        )
+        # FIX Bug #4: sottoscrizione al topic di freeze pubblicato dal bridge
+        self.sub_freeze = self.create_subscription(
+            Bool,
+            '/admittance/freeze',
+            self._freeze_cb,
             10
         )
 
@@ -156,51 +153,83 @@ class AdmittanceController(Node):
     def _js_cb(self, msg: JointState):
         """
         Inizializza theta_v dalla posizione attuale del crank (una sola volta).
-        Evita un transiente iniziale brusco quando il controllore parte
-        con il meccanismo già in una configurazione non nulla.
+        Aggiorna anche _last_real_theta ad ogni tick (usato al resume da freeze).
         """
-        if self._initialized:
-            return
         try:
             idx = msg.name.index(self.joint_name)
         except ValueError:
             return
+
         if idx < len(msg.position):
-            self.theta_v      = float(msg.position[idx])
-            self.theta_dot_v  = 0.0
-            self._initialized = True
-            self.get_logger().info(
-                f"theta_v inizializzato da /joint_states: {self.theta_v:.4f} rad"
-            )
+            self._last_real_theta = float(msg.position[idx])
+
+            if not self._initialized:
+                self.theta_v     = self._last_real_theta
+                self.theta_dot_v = 0.0
+                self._initialized = True
+                self.get_logger().info(
+                    f"theta_v inizializzato da /joint_states: {self.theta_v:.4f} rad"
+                )
 
     def _force_cb(self, msg: Float64):
-        """
-        Riceve tau_ext_theta [Nm] dal nodo della dinamica.
-        È già la proiezione corretta della forza utente su theta:
-            tau_ext_theta = B^T * J^T * W_user
-        Non è necessaria nessuna ulteriore proiezione o conversione.
-        """
         self.tau_ext_theta = float(msg.data)
         self.force_received = True
+
+    def _freeze_cb(self, msg: Bool):
+        """
+        FIX Bug #3/#4: riceve il comando di freeze/unfreeze dal bridge.
+
+        freeze=True  → congela l'integrazione (bridge in STOP).
+                        theta_v e theta_dot_v rimangono al valore corrente.
+        freeze=False → sblocca l'integrazione (bridge esce da STOP).
+                        IMPORTANTE: al resume, theta_v viene resettato alla
+                        posizione reale corrente per evitare spike di coppia
+                        dovuti al drift accumulato durante il freeze.
+        """
+        new_frozen = bool(msg.data)
+
+        if new_frozen == self._frozen:
+            return  # nessun cambiamento di stato
+
+        if new_frozen:
+            self._frozen = True
+            self.get_logger().warn(
+                f'AdmittanceController: FREEZE | theta_v={self.theta_v:.4f} rad'
+            )
+        else:
+            # Resume: riallinea theta_v alla posizione reale per evitare spike
+            if self._last_real_theta is not None:
+                old_theta_v = self.theta_v
+                self.theta_v     = self._last_real_theta
+                self.theta_dot_v = 0.0
+                self.get_logger().info(
+                    f'AdmittanceController: UNFREEZE | '
+                    f'theta_v riallineato: {old_theta_v:.4f} → {self.theta_v:.4f} rad'
+                )
+            else:
+                self.get_logger().warn(
+                    'AdmittanceController: UNFREEZE | _last_real_theta non disponibile, '
+                    'theta_v mantenuto invariato'
+                )
+            self._frozen = False
 
     # ============================================================
     # LOOP DI CONTROLLO
     # ============================================================
 
     def _control_loop(self):
-        """
-        Integra il modello virtuale M-D-K e pubblica il riferimento di traiettoria.
-
-        Equazione del moto virtuale:
-            M * θ̈_v = tau_ext_theta - D * θ̇_v - K * (θ_v - θ_eq)
-
-        Caso degenere M ≈ 0 (smorzatore-molla puro):
-            θ̇_v = (tau_ext_theta - K * (θ_v - θ_eq)) / D
-        """
         if not self._initialized:
             return
 
-        # Lettura parametri (aggiornabili a runtime via ros2 param set)
+        # FIX Bug #3: se il bridge è in STOP, non integrare.
+        # Pubblica comunque il riferimento congelato per mantenere
+        # attivo il topic (evita watchdog del trajectory controller).
+        if self._frozen:
+            ref = Float64MultiArray()
+            ref.data = [float(self.theta_v), 0.0, 0.0]
+            self.pub_ref.publish(ref)
+            return
+
         M        = float(self.get_parameter('M_virt').value)
         D        = float(self.get_parameter('D_virt').value)
         K        = float(self.get_parameter('K_virt').value)
@@ -210,20 +239,14 @@ class AdmittanceController(Node):
         th_max   = float(self.get_parameter('theta_ref_max').value)
         dv_max   = float(self.get_parameter('theta_dot_max').value)
 
-        # Deadband: filtra il rumore di stima su tau_ext_theta
         tau_in = self.tau_ext_theta
         if abs(tau_in) < db:
             tau_in = 0.0
 
-        # Termine elastico: richiamo verso theta_eq
         tau_spring = K * (self.theta_v - theta_eq)
-
-        # Termine viscoso: smorzamento della velocità virtuale
         tau_damper = D * self.theta_dot_v
 
         if M < 1e-6:
-            # Caso degenere: nessuna inerzia virtuale
-            # theta_dot_v segue direttamente la forza netta (smorzatore + molla)
             if D < 1e-6:
                 self.theta_dot_v  = 0.0
                 self.theta_ddot_v = 0.0
@@ -231,19 +254,13 @@ class AdmittanceController(Node):
                 self.theta_dot_v  = (tau_in - tau_spring) / D
                 self.theta_ddot_v = 0.0
         else:
-            # Caso generale: M * θ̈_v = tau_in - tau_damper - tau_spring
             self.theta_ddot_v = (tau_in - tau_damper - tau_spring) / M
 
-        # Integrazione Eulero esplicito
         self.theta_dot_v += self.theta_ddot_v * self._dt
         self.theta_dot_v  = float(np.clip(self.theta_dot_v, -dv_max, dv_max))
         self.theta_v     += self.theta_dot_v * self._dt
         self.theta_v      = float(np.clip(self.theta_v, th_min, th_max))
 
-        # --------------------------------------------------------
-        # Pubblica /trajectory_ref → [θ_ref, θ̇_ref, θ̈_ref]
-        # Consumato da trajectory_controller.py (inner loop PD+)
-        # --------------------------------------------------------
         ref = Float64MultiArray()
         ref.data = [
             float(self.theta_v),
@@ -252,21 +269,6 @@ class AdmittanceController(Node):
         ]
         self.pub_ref.publish(ref)
 
-        # --------------------------------------------------------
-        # Diagnostica /admittance/debug
-        # Layout:
-        #   [0]  theta_v        posizione virtuale (= theta_ref)
-        #   [1]  theta_dot_v    velocità virtuale
-        #   [2]  theta_ddot_v   accelerazione virtuale
-        #   [3]  tau_ext_theta  forza utente (raw, prima della deadband)
-        #   [4]  tau_in         forza utente (dopo deadband)
-        #   [5]  tau_spring     termine elastico K*(theta_v - theta_eq)
-        #   [6]  tau_damper     termine viscoso D*theta_dot_v
-        #   [7]  theta_eq       punto di equilibrio corrente
-        #   [8]  M              inerzia virtuale corrente
-        #   [9]  D              smorzamento virtuale corrente
-        #   [10] K              rigidezza virtuale corrente
-        # --------------------------------------------------------
         diag = Float64MultiArray()
         diag.data = [
             float(self.theta_v),

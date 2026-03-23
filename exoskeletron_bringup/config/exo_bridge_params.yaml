@@ -5,23 +5,30 @@ exo_bridge:
 
     # ── Limiti coppia per modalità sicure [Nm] ──────────────────────
     override_tau_limit:   1.0
-    compliant_tau_limit:  0.73
+    compliant_tau_limit:  2.0
 
     # ── Limiti cinematici per modalità compliant ────────────────────
     compliant_vel_limit:  1.0   # [rad/s]
     compliant_acc_limit:  2.0   # [rad/s²]
 
     # ── Comportamento in STOP ───────────────────────────────────────
-    # hold_only          -> mantiene la posizione, passa tau invariata
-    # zero_torque_only   -> azzera la coppia
+    # zero_torque_only     -> azzera la coppia (DEFAULT — più sicuro)
+    # hold_only            -> mantiene posizione con tau clampata a hold_tau_limit
     # hold_and_zero_torque -> mantiene posizione e azzera coppia
-    stop_mode: 'hold_only'
+    #
+    # ATTENZIONE: 'hold_only' non passa più tau invariata.
+    # La tau viene clampata a ±hold_tau_limit per evitare loop divergenti
+    # in caso di theta congelato o fault sul canale joint_states.
+    stop_mode: 'zero_torque_only'
+
+    # ── Limite coppia in modalità hold_only [Nm] ───────────────────
+    # Usato solo quando stop_mode = 'hold_only'.
+    # Deve essere dimensionato sulla coppia necessaria a mantenere
+    # staticamente il meccanismo contro la gravità (non sul picco dinamico).
+    hold_tau_limit:       4.0
 
     # ── Watchdog sui canali in ingresso [s] ────────────────────────
-    # Se un canale non riceve messaggi entro questo tempo -> SAFE_STOP
     watchdog_timeout_sec: 0.5
 
     # ── Periodo di grazia all'avvio [s] ────────────────────────────
-    # I watchdog non scattano finché il sistema non è stabilizzato.
-    # Deve essere >= al tempo di avvio del nodo più lento.
     watchdog_grace_sec:   2.0
