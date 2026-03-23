@@ -23,30 +23,19 @@ def generate_launch_description():
     #   1 → /trajectory_ref
     #   2 → /torque
     #   3 → /joint_states
-    #
-    # In questa fase SENZA bridge:
-    # - il solo canale selezionato viene trasformato in raw -> faulted
-    # - il nodo a valle legge il topic faulted
-    # - gli altri canali restano invariati
-    # ============================================================
 
-    FAULT_CHANNEL       = 3
+    FAULT_CHANNEL       = 0
     FAULT_TYPE          = 'freeze'
     FAULT_MAGNITUDE     = 0.0
     FAULT_ACTIVE        = False
     NOISE_STD           = 0.1
     SPIKE_DURATION      = 0.05
     TARGET_INDEX        = 0
-    FAULT_JS_FIELD      = 'position'
+    FAULT_JS_FIELD      = 'both'
     JOINT_NAME          = 'rev_crank'
 
     # ------------------------------------------------------------
-    # Remap per il fault injector:
-    # il nodo ha topic hardcoded:
-    #   sub: topic originale
-    #   pub: topic *_faulted
-    #
-    # Qui, solo sul canale selezionato, gli facciamo leggere da *_raw
+    # Remap fault injector
     # ------------------------------------------------------------
     fault_injector_remaps = {
         0: [
@@ -69,8 +58,6 @@ def generate_launch_description():
 
     # ------------------------------------------------------------
     # Dynamics node
-    # - se fault channel 0: pubblica tau_ext su *_raw
-    # - se fault channel 2: legge torque_faulted
     # ------------------------------------------------------------
     dynamics_remaps = []
     if FAULT_CHANNEL == 0:
@@ -84,9 +71,6 @@ def generate_launch_description():
 
     # ------------------------------------------------------------
     # Admittance controller
-    # - se fault channel 0: legge tau_ext_theta_faulted
-    # - se fault channel 1: pubblica trajectory_ref_raw
-    # - se fault channel 3: legge joint_states_faulted
     # ------------------------------------------------------------
     admittance_remaps = []
     if FAULT_CHANNEL == 0:
@@ -104,9 +88,6 @@ def generate_launch_description():
 
     # ------------------------------------------------------------
     # Trajectory controller
-    # - se fault channel 1: legge trajectory_ref_faulted
-    # - se fault channel 2: pubblica torque_raw
-    # - se fault channel 3: legge joint_states_faulted
     # ------------------------------------------------------------
     trajectory_remaps = []
     if FAULT_CHANNEL == 1:
@@ -124,13 +105,31 @@ def generate_launch_description():
 
     # ------------------------------------------------------------
     # RViz
-    # - se fault channel 3: legge joint_states_faulted
     # ------------------------------------------------------------
     rviz_remaps = []
     if FAULT_CHANNEL == 3:
         rviz_remaps.append(
             ('/joint_states', '/joint_states_faulted')
         )
+
+    # ------------------------------------------------------------
+    # Observer
+    # - canale 0: legge tau_ext dal topic raw (pre-fault)
+    # - canale 3: legge joint_states dal topic originale (pre-fault)
+    # Gli altri canali non toccano i topic dell'observer.
+    # ------------------------------------------------------------
+    observer_remaps = []
+    if FAULT_CHANNEL == 0:
+        observer_remaps.append(
+            ('/exo_dynamics/tau_ext_theta', '/exo_dynamics/tau_ext_theta_faulted')
+        )
+    if FAULT_CHANNEL == 3:
+        observer_remaps.append(
+            ('/joint_states', '/joint_states_faulted')
+        )
+    observer_remaps.append(
+        ('/torque_raw', '/torque')
+    )
 
     return LaunchDescription([
 
@@ -187,7 +186,8 @@ def generate_launch_description():
             executable='ekf_observer',
             name='ekf_observer',
             output='screen',
-            parameters=[observer_params_file]
+            parameters=[observer_params_file],
+            remappings=observer_remaps
         ),
 
         Node(

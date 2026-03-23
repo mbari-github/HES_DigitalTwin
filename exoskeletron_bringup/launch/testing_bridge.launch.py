@@ -41,7 +41,7 @@ def generate_launch_description():
     NOISE_STD       = 0.1
     SPIKE_DURATION  = 0.05
     TARGET_INDEX    = 0
-    FAULT_JS_FIELD  = 'position'
+    FAULT_JS_FIELD  = 'both'
     JOINT_NAME      = 'rev_crank'
 
     # ------------------------------------------------------------
