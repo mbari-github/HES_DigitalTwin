@@ -7,7 +7,12 @@ import os
 def generate_launch_description():
     # Percorso al file URDF
     description_pkg = get_package_share_directory('exoskeletron_description')
+    launch_pkg      = get_package_share_directory('exoskeletron_bringup')
+
+
     urdf_file = os.path.join(description_pkg, 'urdf', 'assembly_with_hand.urdf')
+    observer_params_file = os.path.join(launch_pkg, 'config', 'observer_params.yaml')
+
 
     # Legge il contenuto del file URDF
     with open(urdf_file, 'r') as infp:
@@ -49,12 +54,12 @@ def generate_launch_description():
         ),
 
         # LOGGER
-        Node(
-            package='exoskeletron_utils',
-            executable='logger',
-            name='logger',
-            output='screen',
-        ),
+        # Node(
+        #     package='exoskeletron_utils',
+        #     executable='logger',
+        #     name='logger',
+        #     output='screen',
+        # ),
 
 
         # Nodes for control loop - DA RIVEDERE
@@ -72,6 +77,14 @@ def generate_launch_description():
             executable='trajectory_controller',
             name='trajectory_controller',
             output='screen',
+        ),
+
+        Node(
+            package='exoskeletron_dynamics',
+            executable='ekf_observer',
+            name='ekf_observer',
+            output='screen',
+            parameters=[observer_params_file]
         ),
 
     ])

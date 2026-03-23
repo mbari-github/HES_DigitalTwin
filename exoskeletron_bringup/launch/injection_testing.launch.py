@@ -7,7 +7,10 @@ import os
 def generate_launch_description():
 
     description_pkg = get_package_share_directory('exoskeletron_description')
+    launch_pkg = get_package_share_directory('exoskeletron_bringup')
+
     urdf_file = os.path.join(description_pkg, 'urdf', 'assembly_with_hand.urdf')
+    observer_params_file = os.path.join(launch_pkg, 'config', 'observer_params.yaml')
 
     with open(urdf_file, 'r') as infp:
         robot_description_content = infp.read()
@@ -27,8 +30,8 @@ def generate_launch_description():
     # - gli altri canali restano invariati
     # ============================================================
 
-    FAULT_CHANNEL       = 0
-    FAULT_TYPE          = 'noise'
+    FAULT_CHANNEL       = 3
+    FAULT_TYPE          = 'freeze'
     FAULT_MAGNITUDE     = 0.0
     FAULT_ACTIVE        = False
     NOISE_STD           = 0.1
@@ -177,6 +180,14 @@ def generate_launch_description():
             executable='external_wrench_pub',
             name='input',
             output='screen',
+        ),
+
+        Node(
+            package='exoskeletron_dynamics',
+            executable='ekf_observer',
+            name='ekf_observer',
+            output='screen',
+            parameters=[observer_params_file]
         ),
 
         Node(

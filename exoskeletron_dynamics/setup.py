@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'exo_dynamics = exoskeletron_dynamics.new_dynamics_with_hand:main',
+            'ekf_observer = exoskeletron_dynamics.ekf_observer:main',
         ],
     },
 )
