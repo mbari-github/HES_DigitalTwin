@@ -11,6 +11,7 @@ StateMachine::StateMachine()
 : Node("state_machine"),
   state_loader_("exoskeletron_safety_manager", "functional_safety::SafetyTools")
 {
+  this->declare_parameter("fault_monitor.enable_automatic_downgrade", false);
   this->declare_parameter("fault_monitor.tau_compliant_exit",        1.5);
   this->declare_parameter("fault_monitor.tau_torque_limit_exit",     2.5);
   this->declare_parameter("fault_monitor.vel_compliant_exit",        0.8);
@@ -18,6 +19,8 @@ StateMachine::StateMachine()
   this->declare_parameter("fault_monitor.downgrade_count_threshold", 2000);
   this->declare_parameter("fault_monitor.downgrade_negative_weight", 5);
 
+  enable_automatic_downgrade_ =
+    this->get_parameter("fault_monitor.enable_automatic_downgrade").as_bool();
   tau_compliant_exit_    = this->get_parameter("fault_monitor.tau_compliant_exit").as_double();
   tau_torque_limit_exit_ = this->get_parameter("fault_monitor.tau_torque_limit_exit").as_double();
   vel_compliant_exit_    = this->get_parameter("fault_monitor.vel_compliant_exit").as_double();
@@ -84,12 +87,14 @@ void StateMachine::initialize()
 
   RCLCPP_INFO(this->get_logger(),
     "StateMachine initialized | state_topic=/safety_manager/state\n"
+    "  automatic_downgrade     = %s\n"
     "  tau_compliant_exit      = %.2f Nm\n"
     "  tau_torque_limit_exit   = %.2f Nm\n"
     "  vel_compliant_exit      = %.2f rad/s\n"
     "  vel_torque_limit_exit   = %.2f rad/s\n"
     "  downgrade_threshold     = %d samples (%.1fs @ 200Hz)\n"
     "  downgrade_neg_weight    = %d",
+    enable_automatic_downgrade_ ? "ENABLED" : "DISABLED",
     tau_compliant_exit_, tau_torque_limit_exit_,
     vel_compliant_exit_, vel_torque_limit_exit_,
     downgrade_count_threshold_,
@@ -180,6 +185,12 @@ void StateMachine::bridge_status_callback(
   const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
   if (msg->data.size() < 9) return;
+
+  // Se il downgrade automatico è disabilitato, non valutare.
+  // Le transizioni verso stati meno restrittivi avverranno solo
+  // tramite i servizi ROS manuali (/compliant_mode_request data:=false,
+  // /torque_limit_request data:=false, /reset_safety_request).
+  if (!enable_automatic_downgrade_) return;
 
   if (current_state_ != functional_safety::SafetyState::COMPLIANT_MODE &&
       current_state_ != functional_safety::SafetyState::TORQUE_LIMIT_MODE) {

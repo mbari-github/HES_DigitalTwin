@@ -11,6 +11,17 @@ state_machine:
     fault_monitor.vel_torque_limit_threshold: 2.0
     fault_monitor.vel_safe_stop_threshold:    3.0
 
+    # ── Downgrade automatico ─────────────────────────────────────────
+    # Se false, le transizioni verso stati meno restrittivi avvengono
+    # SOLO tramite servizi ROS manuali:
+    #   - /compliant_mode_request  (SetBool, data: false)
+    #   - /torque_limit_request    (SetBool, data: false)
+    #   - /reset_safety_request    (Trigger)
+    #
+    # Raccomandato: false.
+    # Impostare a true solo se i fault sono prevalentemente transitori.
+    fault_monitor.enable_automatic_downgrade: false
+
     # ── Soglie coppia — uscita/downgrade [Nm] ───────────────────────
     fault_monitor.tau_compliant_exit:         4.5
     fault_monitor.tau_torque_limit_exit:      7.0
@@ -36,3 +47,4 @@ state_machine:
     # Peso dei campioni negativi: 1 negativo annulla N positivi
     # Con K=5: serve il 83% di campioni positivi per avanzare
     fault_monitor.downgrade_negative_weight:  5
+

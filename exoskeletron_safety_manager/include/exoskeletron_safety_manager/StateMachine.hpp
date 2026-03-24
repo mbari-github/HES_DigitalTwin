@@ -104,7 +104,11 @@ private:
   std::string last_transition_reason_ {"init"};
   rclcpp::Time last_transition_time_;
 
-  // ── Soglie downgrade ─────────────────────────────────────────────
+  // ── Downgrade automatico ─────────────────────────────────────────
+  // Se false, le transizioni verso stati meno restrittivi avvengono
+  // solo tramite servizi ROS manuali. Default: false (disabilitato).
+  bool enable_automatic_downgrade_ {false};
+
   double tau_compliant_exit_    {1.5};
   double tau_torque_limit_exit_ {2.5};
   double vel_compliant_exit_    {0.8};
