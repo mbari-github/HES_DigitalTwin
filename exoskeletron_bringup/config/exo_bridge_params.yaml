@@ -4,8 +4,8 @@ exo_bridge:
     publish_rate_hz:      200.0
 
     # ── Limiti coppia per modalità sicure [Nm] ──────────────────────
-    override_tau_limit:   1.0
-    compliant_tau_limit:  2.0
+    override_tau_limit:   2.0
+    compliant_tau_limit:  4.0
 
     # ── Limiti cinematici per modalità compliant ────────────────────
     compliant_vel_limit:  1.0   # [rad/s]
