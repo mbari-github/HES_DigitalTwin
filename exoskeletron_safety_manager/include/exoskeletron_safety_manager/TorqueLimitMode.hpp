@@ -21,7 +21,15 @@ public:
   void stop()     override { request_mode("torque_limit"); }
   void pause()    override {}
   void resume()   override { request_mode("torque_limit"); }
-  void shutdown() override { request_mode("nominal"); }
+
+  // FIX BUG 2: shutdown() non manda più request_mode("nominal").
+  void shutdown() override
+  {
+    if (node_) {
+      RCLCPP_INFO(node_->get_logger(), "TorqueLimitMode shutdown (bridge mode delegated to next plugin)");
+    }
+  }
+
   void set_safety_params(double) override {}
 };
 }

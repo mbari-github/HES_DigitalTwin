@@ -46,14 +46,21 @@ void FaultMonitorMode::initialize(const rclcpp::Node::SharedPtr & node)
 
   load_thresholds_from_params();
 
-  // ---- Avvia grace period ----
-  // Durante il grace period i messaggi su /exo_bridge/status vengono
-  // ricevuti ma non valutati. Questo evita che messaggi stale rimasti
-  // in coda dalla condizione di fault precedente causino un SAFE_STOP
-  // immediato appena FaultMonitorMode viene (ri)caricato dopo un reset.
+  // ---- Grace period ----
   grace_period_active_ = true;
   grace_period_end_ = node_->now() +
     rclcpp::Duration::from_seconds(grace_period_seconds_);
+
+  // FIX BUG 1/2: inizializza il BridgeModeClient e porta il bridge
+  // a "nominal". Questo è il punto in cui il bridge viene allineato
+  // allo stato della state machine. Prima di questo fix, nessun plugin
+  // era responsabile di portare il bridge a "nominal" all'ingresso in
+  // FAULT_MONITOR — si dipendeva dallo shutdown() del plugin uscente
+  // che mandava "nominal", ma questo causava il transitorio di BUG 2
+  // (per le altre transizioni) e il mancato coordinamento di BUG 1
+  // (per il reset da SAFE_STOP).
+  init_bridge_client(node);
+  request_mode("nominal");
 
   RCLCPP_INFO(
     node_->get_logger(),
@@ -174,72 +181,38 @@ bool FaultMonitorMode::is_more_severe(
 }
 
 // ============================================================
-// Debounce ingresso
+// Debounce
 // ============================================================
 
 void FaultMonitorMode::update_debounce_counters(FaultResponseLevel level)
 {
-  switch (level) {
-    case FaultResponseLevel::SAFE_STOP:
-      stop_counter_++;
-      torque_counter_ = 0;
-      compliant_counter_ = 0;
-      break;
-    case FaultResponseLevel::TORQUE_LIMIT:
-      torque_counter_++;
-      stop_counter_ = 0;
-      compliant_counter_ = 0;
-      break;
-    case FaultResponseLevel::COMPLIANT:
-      compliant_counter_++;
-      torque_counter_ = 0;
-      stop_counter_ = 0;
-      break;
-    default:
-      compliant_counter_ = 0;
-      torque_counter_ = 0;
-      stop_counter_ = 0;
-      break;
-  }
+  if (level >= FaultResponseLevel::COMPLIANT)    ++compliant_counter_;  else compliant_counter_ = 0;
+  if (level >= FaultResponseLevel::TORQUE_LIMIT) ++torque_counter_;     else torque_counter_ = 0;
+  if (level >= FaultResponseLevel::SAFE_STOP)    ++stop_counter_;       else stop_counter_ = 0;
 }
 
 FaultResponseLevel FaultMonitorMode::debounced_entry_level() const
 {
   if (stop_counter_      >= stop_count_threshold_)      return FaultResponseLevel::SAFE_STOP;
-  if (torque_counter_    >= torque_count_threshold_)    return FaultResponseLevel::TORQUE_LIMIT;
-  if (compliant_counter_ >= compliant_count_threshold_) return FaultResponseLevel::COMPLIANT;
+  if (torque_counter_    >= torque_count_threshold_)     return FaultResponseLevel::TORQUE_LIMIT;
+  if (compliant_counter_ >= compliant_count_threshold_)  return FaultResponseLevel::COMPLIANT;
   return FaultResponseLevel::NOMINAL;
 }
 
 // ============================================================
-// Callback status bridge
+// Bridge status callback
 // ============================================================
 
 void FaultMonitorMode::bridge_status_callback(
   const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
-  if (!node_) return;
+  if (!node_ || msg->data.size() < 9) return;
 
-  if (msg->data.size() < 8) {
-    RCLCPP_WARN(node_->get_logger(),
-      "FaultMonitorMode: /exo_bridge/status malformed (size=%zu)",
-      msg->data.size());
-    return;
-  }
-
-  // ---- Grace period ----
-  // Ricevi ma non valutare durante il grace period post-inizializzazione.
-  // Questo evita che messaggi stale rimasti in coda dalla condizione di
-  // fault precedente causino un SAFE_STOP immediato dopo il reset.
   if (grace_period_active_) {
     if (node_->now() < grace_period_end_) {
       return;
     }
-    // Grace period terminato: riprendi la valutazione normale.
     grace_period_active_ = false;
-    // Reset dei contatori di debounce per evitare che campioni
-    // accumulati durante il grace period influenzino la prima
-    // valutazione reale.
     compliant_counter_ = 0;
     torque_counter_ = 0;
     stop_counter_ = 0;
@@ -253,6 +226,10 @@ void FaultMonitorMode::bridge_status_callback(
   last_msg_time_ = node_->now();
 
   const double theta_dot = msg->data[3];
+  // L'escalation usa tau_out (data[5]): la coppia effettivamente al plant.
+  // Questo è corretto perché il FaultMonitorMode valuta se il plant sta
+  // subendo una coppia pericolosa, non quale coppia il controller vorrebbe
+  // applicare.
   const double tau_in    = msg->data[5];
 
   const auto tau_level     = evaluate_tau_entry(tau_in);
@@ -265,15 +242,6 @@ void FaultMonitorMode::bridge_status_callback(
   if (!is_more_severe(entry_level, last_requested_level_)) {
     return;
   }
-
-  // NOTA ARCHITETTURALE:
-  // Il FaultMonitorMode richiede le transizioni di stato alla StateMachine
-  // tramite servizi ROS interni (plugin -> servizio -> nodo che ospita il plugin).
-  // È funzionale ma introduce latenza (una RTT per ogni transizione).
-  // Una soluzione più pulita è passare un std::function<void()> al plugin
-  // durante initialize(), eliminando il roundtrip ROS.
-  // Lasciato come TODO per un refactor futuro che richiede di modificare
-  // l'interfaccia SafetyTools.hpp.
 
   switch (entry_level) {
     case FaultResponseLevel::SAFE_STOP:
@@ -313,7 +281,6 @@ void FaultMonitorMode::watchdog_callback()
 {
   if (!node_ || !message_received_) return;
 
-  // Non attivare il watchdog durante il grace period.
   if (grace_period_active_) return;
 
   const double elapsed = (node_->now() - last_msg_time_).seconds();

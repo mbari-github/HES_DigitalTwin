@@ -2,6 +2,7 @@
 #define EXOSKELETRON_SAFETY_MANAGER_FAULT_MONITOR_MODE_HPP
 
 #include "exoskeletron_safety_manager/SafetyTools.hpp"
+#include "exoskeletron_safety_manager/BridgeModeClient.hpp"
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
@@ -18,7 +19,11 @@ enum class FaultResponseLevel
   SAFE_STOP = 3
 };
 
-class FaultMonitorMode : public SafetyTools
+// FIX BUG 1/2: FaultMonitorMode ora eredita anche da BridgeModeClient
+// per poter chiamare request_mode("nominal") nel suo initialize().
+// Questo garantisce che all'ingresso in FAULT_MONITOR (sia da init che
+// da reset) il bridge venga esplicitamente portato a "nominal".
+class FaultMonitorMode : public SafetyTools, protected BridgeModeClient
 {
 public:
   FaultMonitorMode() = default;
@@ -66,7 +71,6 @@ private:
     bool value);
 
 private:
-  rclcpp::Node::SharedPtr node_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr bridge_status_sub_;
   rclcpp::TimerBase::SharedPtr watchdog_timer_;
 
@@ -98,10 +102,7 @@ private:
   rclcpp::Time last_msg_time_;
   double status_timeout_seconds_{0.5};
 
-  // Grace period post-inizializzazione:
-  // durante questo intervallo i messaggi vengono ricevuti ma non
-  // valutati, per evitare che messaggi stale in coda dalla condizione
-  // di fault precedente causino un SAFE_STOP immediato dopo il reset.
+  // Grace period post-inizializzazione
   bool grace_period_active_{false};
   rclcpp::Time grace_period_end_;
   double grace_period_seconds_{2.0};

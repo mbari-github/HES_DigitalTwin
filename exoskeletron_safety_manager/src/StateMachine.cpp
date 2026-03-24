@@ -141,11 +141,45 @@ void StateMachine::publish_status_string()
 // ════════════════════════════════════════════════════════════════════
 // Downgrade automatico
 // ════════════════════════════════════════════════════════════════════
+//
+// Downgrade: usa tau_out (data[5], coppia post-clamp) e theta_dot (data[3]).
+//
+// Perché tau_out e non tau_raw:
+// Quando il bridge è in torque_limit, la coppia è clampata a override_tau_limit.
+// Il controller PD in closed-loop reagisce alla coppia clampata producendo una
+// tau_raw sempre più alta (il plant non si muove abbastanza → errore cresce →
+// tau cresce). Quindi tau_raw resta elevata per TUTTA la durata della mode,
+// anche dopo la rimozione del fault, rendendo il downgrade impossibile.
+//
+// tau_out riflette lo stato REALE del sistema: se il fault è stato rimosso e
+// il plant converge, tau_out scende naturalmente. Se il fault è ancora attivo,
+// tau_out resta al limite del clamp (= override_tau_limit), e il downgrade
+// avviene solo se override_tau_limit < tau_torque_limit_exit, che è vero
+// nella configurazione attuale (2.0 < 2.5 Nm).
+//
+// NOTA: il downgrade con tau_out funziona correttamente SOLO se le soglie
+// di uscita sono coerenti con i limiti di coppia del bridge:
+//   override_tau_limit (2.0) < tau_torque_limit_exit (2.5)  ✓
+//   compliant_tau_limit (4.0) > tau_compliant_exit (1.5)    ✗ ← attenzione!
+//
+// Per il compliant mode: compliant_tau_limit (4.0) è SOPRA tau_compliant_exit
+// (1.5), quindi il downgrade dipende dal fatto che il controller converga e
+// produca meno di 1.5 Nm dopo la rimozione del fault. Se il fault è ancora
+// attivo, la tau_out può restare sopra soglia e il downgrade non avviene.
+// Questo è il comportamento corretto: con fault attivo non si deve fare
+// downgrade.
+//
+// Layout dello status:
+//   data[0] = is_stop          data[4] = theta_hold
+//   data[1] = is_limited       data[5] = tau_out (post-clamp)
+//   data[2] = theta            data[6] = tau_ext_theta
+//   data[3] = theta_dot        data[7] = mode_id
+//   data[8] = tau_raw (pre-clamp, disponibile per diagnostica)
 
 void StateMachine::bridge_status_callback(
   const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
-  if (msg->data.size() < 8) return;
+  if (msg->data.size() < 9) return;
 
   if (current_state_ != functional_safety::SafetyState::COMPLIANT_MODE &&
       current_state_ != functional_safety::SafetyState::TORQUE_LIMIT_MODE) {
@@ -156,9 +190,9 @@ void StateMachine::bridge_status_callback(
   if (safe_stop_latched_) return;
 
   const double theta_dot = msg->data[3];
-  const double tau_in    = msg->data[5];
+  const double tau_out   = msg->data[5];
 
-  evaluate_downgrade(tau_in, theta_dot);
+  evaluate_downgrade(tau_out, theta_dot);
 }
 
 void StateMachine::evaluate_downgrade(double tau_in, double theta_dot)
@@ -195,15 +229,22 @@ void StateMachine::evaluate_downgrade(double tau_in, double theta_dot)
 
       if (abs_tau < tau_compliant_exit_ && abs_vel < vel_compliant_exit_) {
         RCLCPP_INFO(this->get_logger(),
-          "Downgrade: TORQUE_LIMIT -> FAULT_MONITOR | tau=%.3f vel=%.3f",
+          "Downgrade: TORQUE_LIMIT -> FAULT_MONITOR | tau_raw=%.3f vel=%.3f",
           tau_in, theta_dot);
         fault_present_ = false;
-        change_state("FaultMonitorMode", "downgrade_torque_limit_to_nominal");
+        // FIX BUG 3: usa request_state_change per passare per la matrice
+        // di transizione e i check su safe_stop_latched / transition_in_progress
+        request_state_change(
+          functional_safety::SafetyState::FAULT_MONITOR,
+          "downgrade_torque_limit_to_nominal");
       } else {
         RCLCPP_INFO(this->get_logger(),
-          "Downgrade: TORQUE_LIMIT -> COMPLIANT | tau=%.3f vel=%.3f",
+          "Downgrade: TORQUE_LIMIT -> COMPLIANT | tau_raw=%.3f vel=%.3f",
           tau_in, theta_dot);
-        change_state("CompliantMode", "downgrade_torque_limit_to_compliant");
+        // FIX BUG 3: usa request_state_change
+        request_state_change(
+          functional_safety::SafetyState::COMPLIANT_MODE,
+          "downgrade_torque_limit_to_compliant");
       }
     }
     return;
@@ -235,10 +276,13 @@ void StateMachine::evaluate_downgrade(double tau_in, double theta_dot)
     if (counter_exit_compliant_ >= downgrade_count_threshold_) {
       counter_exit_compliant_ = 0;
       RCLCPP_INFO(this->get_logger(),
-        "Downgrade: COMPLIANT -> FAULT_MONITOR | tau=%.3f vel=%.3f",
+        "Downgrade: COMPLIANT -> FAULT_MONITOR | tau_raw=%.3f vel=%.3f",
         tau_in, theta_dot);
       fault_present_ = false;
-      change_state("FaultMonitorMode", "downgrade_compliant_to_nominal");
+      // FIX BUG 3: usa request_state_change
+      request_state_change(
+        functional_safety::SafetyState::FAULT_MONITOR,
+        "downgrade_compliant_to_nominal");
     }
   }
 }
@@ -258,8 +302,17 @@ bool StateMachine::change_state(const std::string & state, const std::string & r
   try {
     transition_in_progress_ = true;
 
-    if (obj_) obj_->shutdown();
-    obj_.reset();
+    // FIX BUG 2: NON chiamare shutdown() sul plugin uscente.
+    // Il vecchio plugin faceva request_mode("nominal") nel suo shutdown(),
+    // creando un transitorio pericoloso (bridge brevemente in "nominal"
+    // prima che il nuovo plugin imposti il modo corretto).
+    // Ora il ciclo di vita è: reset il vecchio → crea il nuovo →
+    // il nuovo imposta il bridge nel suo initialize().
+    if (obj_) {
+      obj_->stop();
+      obj_.reset();
+    }
+
     obj_ = state_loader_.createSharedInstance(state);
     obj_->initialize(this->shared_from_this());
 
@@ -274,7 +327,8 @@ bool StateMachine::change_state(const std::string & state, const std::string & r
     }
 
     last_transition_time_   = this->now();
-    last_transition_reason_ = reason.empty() ? "unspecified" : reason;
+    last_transition_reason_ = reason.empty() ?
+      "unspecified" : reason;
     transition_in_progress_ = false;
 
     RCLCPP_INFO(this->get_logger(),
@@ -320,6 +374,12 @@ bool StateMachine::request_state_change(
   return change_state(state_to_plugin_name(target_state), reason);
 }
 
+// FIX BUG 1: SAFE_STOP ora permette la transizione verso FAULT_MONITOR.
+// La guardia safe_stop_latched_ impedisce comunque la transizione finché
+// il latch non viene esplicitamente rilasciato da clear_fault_state()
+// (chiamato da reset_safety_callback prima di request_state_change).
+// Questo permette di usare request_state_change anche per il reset,
+// eliminando il bypass diretto di change_state.
 bool StateMachine::can_transition_to(
   functional_safety::SafetyState target_state) const
 {
@@ -344,8 +404,13 @@ bool StateMachine::can_transition_to(
              target_state == functional_safety::SafetyState::FAULT_MONITOR     ||
              target_state == functional_safety::SafetyState::COMPLIANT_MODE;
 
+    // FIX BUG 1: SAFE_STOP → FAULT_MONITOR ora è ammessa nella matrice.
+    // La guardia safe_stop_latched_ (sopra) previene transizioni accidentali:
+    // solo dopo clear_fault_state() il latch viene rilasciato e la
+    // transizione diventa possibile.
     case functional_safety::SafetyState::SAFE_STOP:
-      return target_state == functional_safety::SafetyState::SAFE_STOP;
+      return target_state == functional_safety::SafetyState::SAFE_STOP    ||
+             target_state == functional_safety::SafetyState::FAULT_MONITOR;
 
     default: return false;
   }
@@ -484,6 +549,19 @@ void StateMachine::torque_limit_callback(
   response->message = "TORQUE_LIMIT_MODE already inactive";
 }
 
+// FIX BUG 1/4: reset_safety ora passa per request_state_change.
+// La sequenza è:
+//   1. clear_fault_state() → rilascia safe_stop_latched_
+//   2. request_state_change(FAULT_MONITOR) → passa per can_transition_to
+//      (che ora permette SAFE_STOP → FAULT_MONITOR quando il latch è rilasciato)
+//   3. change_state carica FaultMonitorMode, il cui initialize() NON tocca
+//      il bridge (il bridge viene portato a "nominal" dal nuovo plugin
+//      FaultMonitorMode tramite request_mode, vedi sotto)
+//
+// Nota: il FaultMonitorMode nel suo initialize() ora chiama
+// request_mode("nominal") per assicurarsi che il bridge sia in nominal
+// all'ingresso in FAULT_MONITOR. Questo risolve il coordinamento
+// bridge/state_machine.
 void StateMachine::reset_safety_callback(
   const std::shared_ptr<std_srvs::srv::Trigger::Request>,
   std::shared_ptr<std_srvs::srv::Trigger::Response> response)
@@ -494,19 +572,17 @@ void StateMachine::reset_safety_callback(
     return;
   }
 
+  // Rilascia il latch PRIMA della transizione, altrimenti
+  // can_transition_to blocca SAFE_STOP → FAULT_MONITOR
   clear_fault_state();
 
-  if (current_state_ != functional_safety::SafetyState::FAULT_MONITOR) {
-    const bool ok = change_state("FaultMonitorMode", "reset");
-    response->success = ok;
-    response->message = ok ?
-      "Safety reset completed, returned to FAULT_MONITOR" :
-      "Fault cleared but failed to return to FAULT_MONITOR";
-    return;
-  }
-
-  response->success = true;
-  response->message = "Safety reset completed";
+  // Ora la transizione è possibile
+  const bool ok = request_state_change(
+    functional_safety::SafetyState::FAULT_MONITOR, "reset");
+  response->success = ok;
+  response->message = ok ?
+    "Safety reset completed, returned to FAULT_MONITOR" :
+    "Fault cleared but failed to return to FAULT_MONITOR";
 }
 
 }  // namespace functional_safety

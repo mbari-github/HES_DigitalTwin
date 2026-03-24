@@ -1,9 +1,10 @@
 state_machine:
   ros__parameters:
+    # I valori scelti sono puramente a scopo di test (E' un MUST che siano Double)
     # ── Soglie coppia — attivazione [Nm] ────────────────────────────
-    fault_monitor.tau_compliant_threshold:    3.5
-    fault_monitor.tau_torque_limit_threshold: 4.5
-    fault_monitor.tau_safe_stop_threshold:    5.0
+    fault_monitor.tau_compliant_threshold:    5.0
+    fault_monitor.tau_torque_limit_threshold: 7.5
+    fault_monitor.tau_safe_stop_threshold:    10.0
 
     # ── Soglie velocità — attivazione [rad/s] ───────────────────────
     fault_monitor.vel_compliant_threshold:    1.5
@@ -11,8 +12,8 @@ state_machine:
     fault_monitor.vel_safe_stop_threshold:    3.0
 
     # ── Soglie coppia — uscita/downgrade [Nm] ───────────────────────
-    fault_monitor.tau_compliant_exit:         1.5
-    fault_monitor.tau_torque_limit_exit:      2.5
+    fault_monitor.tau_compliant_exit:         4.5
+    fault_monitor.tau_torque_limit_exit:      7.0
 
     # ── Soglie velocità — uscita/downgrade [rad/s] ──────────────────
     fault_monitor.vel_compliant_exit:         0.8

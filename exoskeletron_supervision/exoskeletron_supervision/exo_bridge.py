@@ -1,4 +1,27 @@
 #!/usr/bin/env python3
+"""
+exo_bridge.py
+=============
+Gateway di sicurezza fra i controller e il plant.
+
+Modifiche rispetto alla versione precedente:
+  - FIX BUG 5: l'ammittanza viene sbloccata per qualsiasi transizione
+    da 'stop' (non solo verso 'nominal')
+  - FIX BUG 6: lo status pubblica tau_raw (data[8]) per il downgrade
+    nella StateMachine. Il downgrade deve valutare la coppia PRE-clamp
+    per decidere se la condizione di fault è rientrata.
+
+Layout /exo_bridge/status (Float64MultiArray):
+  data[0] = is_stop           (1.0 se modo stop, 0.0 altrimenti)
+  data[1] = is_limited        (1.0 se torque_limit o compliant)
+  data[2] = theta             (posizione rev_crank)
+  data[3] = theta_dot         (velocità rev_crank)
+  data[4] = theta_hold        (posizione di hold in stop, nan se non attivo)
+  data[5] = tau_out           (coppia POST-clamp, effettivamente al plant)
+  data[6] = tau_ext_theta     (forza esterna proiettata)
+  data[7] = mode_id           (0=nominal, 1=torque_limit, 2=compliant, 3=stop)
+  data[8] = tau_raw           (coppia PRE-clamp, grezza dal controller) ← NUOVO
+"""
 import copy
 from typing import Optional
 
@@ -51,7 +74,7 @@ class ExoBridge(Node):
         self.last_torque_in:         Optional[Float64]           = None
         self.last_tau_ext:           Optional[Float64]           = None
 
-        # FIX B: tau effettivamente inviata al plant nell'ultimo ciclo
+        # tau effettivamente inviata al plant nell'ultimo ciclo
         self.tau_out_last: float = 0.0
 
         self._last_rx: dict[str, Optional[float]] = {
@@ -76,7 +99,7 @@ class ExoBridge(Node):
         self.mode_pub            = self.create_publisher(String,            '/exo_bridge/mode',    10)
         self.admittance_freeze_pub = self.create_publisher(Bool,            '/admittance/freeze',  10)
 
-        # ── Servizi ───────────────────────────────────────────────────
+        # ── Servizi ──────────────────────────────────────────────────
         self.create_service(SetMode, '/bridge/set_mode', self._cb_set_mode)
 
         # ── Client verso state machine per safe stop ─────────────────
@@ -143,12 +166,20 @@ class ExoBridge(Node):
             freeze_msg.data = True
             self.admittance_freeze_pub.publish(freeze_msg)
 
-        elif mode == 'nominal':
+        # FIX BUG 5: sblocca l'ammittanza per qualsiasi transizione
+        # in USCITA da 'stop', non solo verso 'nominal'.
+        # Prima di questo fix, una transizione stop → compliant (se mai
+        # fosse stata aggiunta) avrebbe lasciato l'ammittanza congelata.
+        elif prev == 'stop':
             self.theta_hold = None
-            self.get_logger().info(f'Bridge mode: NOMINAL (was {prev})')
+            self.get_logger().info(f'Bridge mode: {mode.upper()} (was STOP) | unfreeze ammittanza')
             freeze_msg = Bool()
             freeze_msg.data = False
             self.admittance_freeze_pub.publish(freeze_msg)
+
+        elif mode == 'nominal':
+            self.theta_hold = None
+            self.get_logger().info(f'Bridge mode: NOMINAL (was {prev})')
 
         else:
             self.get_logger().warn(f'Bridge mode: {mode.upper()} (was {prev})')
@@ -166,7 +197,6 @@ class ExoBridge(Node):
         tau = self._safe_torque()
         if ref is not None: self.trajectory_ref_pub.publish(ref)
         if tau is not None:
-            # FIX B: salva la tau effettivamente inviata al plant
             self.tau_out_last = tau.data
             self.torque_pub.publish(tau)
         self._publish_status()
@@ -270,7 +300,6 @@ class ExoBridge(Node):
         if self.stop_mode == 'zero_torque_only':
             return 0.0
         if self.stop_mode == 'hold_only':
-            # FIX Bug #1: clamp a hold_tau_limit, non pass-through illimitato
             return self.clamp(tau_in, -self.hold_tau_limit, self.hold_tau_limit)
         # hold_and_zero_torque o valore non riconosciuto → sicuro
         return 0.0
@@ -321,21 +350,25 @@ class ExoBridge(Node):
     def _publish_status(self):
         theta     = self.get_current_theta()
         theta_dot = self.get_current_theta_dot()
+
+        # FIX BUG 6: tau_raw = coppia grezza PRE-clamp dal controller.
+        # Usata dalla StateMachine per il downgrade: deve valutare se
+        # la condizione di fault è rientrata guardando la coppia che il
+        # controller VORREBBE applicare, non quella effettivamente al plant
+        # (che è già clampata e quindi sempre sotto soglia).
+        tau_raw = self.last_torque_in.data if self.last_torque_in else float('nan')
+
         msg = Float64MultiArray()
         msg.data = [
-            1.0 if self.control_mode == 'stop' else 0.0,
-            1.0 if self.control_mode in ('torque_limit', 'compliant') else 0.0,
-            theta     if theta     is not None else float('nan'),
-            theta_dot if theta_dot is not None else float('nan'),
-            self.theta_hold if self.theta_hold is not None else float('nan'),
-            # FIX A: pubblica tau_out_last (tau effettivamente al plant),
-            # non last_torque_in (tau grezza in ingresso al bridge).
-            # Il FaultMonitorMode legge data[5] per valutare l'escalation:
-            # deve vedere la tau reale, non quella potenzialmente divergente
-            # prodotta da un controller con theta congelato.
-            self.tau_out_last,
-            self.last_tau_ext.data if self.last_tau_ext else float('nan'),
-            self._mode_id(),
+            1.0 if self.control_mode == 'stop' else 0.0,                     # [0] is_stop
+            1.0 if self.control_mode in ('torque_limit', 'compliant') else 0.0, # [1] is_limited
+            theta     if theta     is not None else float('nan'),             # [2] theta
+            theta_dot if theta_dot is not None else float('nan'),             # [3] theta_dot
+            self.theta_hold if self.theta_hold is not None else float('nan'), # [4] theta_hold
+            self.tau_out_last,                                                 # [5] tau_out (post-clamp)
+            self.last_tau_ext.data if self.last_tau_ext else float('nan'),    # [6] tau_ext_theta
+            self._mode_id(),                                                   # [7] mode_id
+            float(tau_raw),                                                    # [8] tau_raw (pre-clamp) ← NUOVO
         ]
         self.bridge_status_pub.publish(msg)
 

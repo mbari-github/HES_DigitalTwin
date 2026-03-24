@@ -33,8 +33,8 @@ def generate_launch_description():
     #   2 -> /torque
     #   3 -> /joint_states
 
-    FAULT_CHANNEL   = 0
-    FAULT_TYPE      = 'freeze'
+    FAULT_CHANNEL   = 2
+    FAULT_TYPE      = 'offset'
     FAULT_MAGNITUDE = 1.0
     FAULT_ACTIVE    = False
     NOISE_STD       = 0.1
