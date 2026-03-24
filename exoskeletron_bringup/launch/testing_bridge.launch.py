@@ -15,10 +15,10 @@ def generate_launch_description():
     with open(urdf_file, 'r') as infp:
         robot_description_content = infp.read()
 
-    safety_params_file = os.path.join(launch_pkg, 'config', 'safety_params.yaml')
+    safety_params_file     = os.path.join(launch_pkg, 'config', 'safety_params.yaml')
     exo_bridge_params_file = os.path.join(launch_pkg, 'config', 'exo_bridge_params.yaml')
-    observer_params_file = os.path.join(launch_pkg, 'config', 'observer_params.yaml')
-    dynamics_params_file = os.path.join(launch_pkg, 'config', 'dynamics_params.yaml')
+    observer_params_file   = os.path.join(launch_pkg, 'config', 'observer_params.yaml')
+    dynamics_params_file   = os.path.join(launch_pkg, 'config', 'dynamics_params.yaml')
 
     # ============================================================
     # CONFIGURAZIONE GENERALE
@@ -34,7 +34,7 @@ def generate_launch_description():
     #   2 -> /torque
     #   3 -> /joint_states
 
-    FAULT_CHANNEL   = 3
+    FAULT_CHANNEL   = 0
     FAULT_TYPE      = 'freeze'
     FAULT_MAGNITUDE = 1.0
     FAULT_ACTIVE    = False
@@ -133,6 +133,39 @@ def generate_launch_description():
                 ('/joint_states', '/joint_states_faulted')
             )
 
+    # ------------------------------------------------------------
+    # Remaps observer
+    #
+    # L'observer deve sempre vedere i topic faultati, perché è
+    # proprio lì che deve rilevare le anomalie.
+    #
+    # Il remap /torque_raw → /torque è sempre necessario in questo
+    # launch: il trajectory controller pubblica su /torque_raw
+    # (intermediato dal bridge), quindi l'observer deve seguire
+    # lo stesso flusso.
+    #
+    # Canale 0: tau_ext_theta faultata → observer la riceve
+    # Canale 2: torque faultato        → observer lo riceve
+    # Canale 3: joint_states faultato  → observer li riceve
+    # Canale 1: trajectory_ref         → non è un ingresso dell'observer
+    # ------------------------------------------------------------
+    observer_remaps = [
+        ('/torque', '/torque_raw'),   # sempre: segue il flusso torque del bridge
+    ]
+    if USE_FAULT_INJECTOR:
+        if FAULT_CHANNEL == 0:
+            observer_remaps.append(
+                ('/exo_dynamics/tau_ext_theta', '/exo_dynamics/tau_ext_theta_faulted')
+            )
+        if FAULT_CHANNEL == 2:
+            observer_remaps.append(
+                ('/torque', '/torque_faulted')
+            )
+        if FAULT_CHANNEL == 3:
+            observer_remaps.append(
+                ('/joint_states', '/joint_states_faulted')
+            )
+
     # ============================================================
     # NODI — avvio immediato
     # ============================================================
@@ -201,7 +234,8 @@ def generate_launch_description():
             executable='ekf_observer',
             name='ekf_observer',
             output='screen',
-            parameters=[observer_params_file]
+            parameters=[observer_params_file],
+            remappings=observer_remaps
         ),
     ]
 
