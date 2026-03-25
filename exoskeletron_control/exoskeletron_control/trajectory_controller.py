@@ -7,10 +7,48 @@ Inner-loop trajectory controller per la dinamica ridotta dell'esoscheletro.
 Schema:
   - Legge theta / theta_dot da /joint_states  (joint: rev_crank)
   - Riceve riferimenti theta_ref, theta_dot_ref, theta_ddot_ref da /trajectory_ref
-  - Calcola azione di controllo PD+ con feed-forward di gravità:
-      tau = M_eff * (theta_ddot_ref + Kp*(theta_ref - theta) + Kd*(theta_dot_ref - theta_dot))
-            + g_proj + tau_pass_theta
-  - Pubblica tau su /torque  (Float64)
+  - Calcola azione di controllo PD + feed-forward completo:
+
+      tau_ff = M_eff * theta_ddot_ref
+              + proj                          (Coriolis + gravità proiettati)
+              - tau_pass_theta                (coppie passive, segno corretto)
+              + fric_visc * theta_dot_ref     (compensazione attrito viscoso)
+              + damping_theta * theta_dot_ref (compensazione smorzamento)
+
+      tau_pd = Kp * e_theta + Kd * e_theta_dot
+
+      tau_m = tau_pd + tau_ff
+
+  Derivazione dal modello del plant:
+  -----------------------------------
+  L'equazione ridotta del plant è:
+
+      M_eff * θ̈ = τ_m + τ_pass + τ_ext - proj - τ_fric - τ_damp
+
+  Riordinata per τ_m (ciò che il controller deve generare):
+
+      τ_m = M_eff * θ̈ + proj + τ_fric + τ_damp - τ_pass - τ_ext
+
+  Il FF compensa tutti i termini noti del modello (escluso τ_ext, che è
+  l'azione intenzionale dell'utente e non va cancellata):
+
+      τ_ff = M_eff * θ̈_ref + proj - τ_pass + τ_visc_ref + τ_damp_ref
+
+  dove τ_visc_ref e τ_damp_ref sono calcolati sulla velocità di
+  RIFERIMENTO (θ̇_ref) per evitare loop algebrici con la misura.
+
+  NOTA: l'attrito Coulomb NON viene compensato nel FF perché è un
+  termine non lineare e dissipativo che agisce sulla velocità REALE
+  (non su θ̇_ref). Compensarlo su θ̇_ref crea sovracompensazione:
+  il FF pompa ±fric_coul Nm in modo quasi binario, il plant accelera
+  e l'attrito reale si auto-bilancia, ma il FF continua a spingere.
+  Il PD è più adatto a gestire l'attrito Coulomb residuo.
+
+  Nota sui termini di ff_terms dal plant:
+    ff_terms[0] = denom = M_eff = B^T M B + Jm
+    ff_terms[1] = proj  = B^T (M Ḃ θ̇ + h)     ← usato ora (era g_proj!)
+    ff_terms[2] = g_proj = B^T h                ← non più usato
+    ff_terms[3] = tau_pass_theta
 
   Modalità STOP (bridge in 'stop'):
   ----------------------------------
@@ -21,13 +59,14 @@ Schema:
     - mantiene SOLO g_proj dell'ultimo ciclo pre-stop come coppia statica
       per contrastare la gravità
 
-  Questo previene il problema in cui theta è congelato da fault injection
-  (canale 3) ma i ff_terms (g_proj, tau_pass_theta) continuano ad aggiornarsi
-  con la q reale del plant: in quel caso tau_ff sarebbe non nulla anche con
-  e_theta = 0, producendo una coppia inattesa passata invariata dal bridge
-  in hold_only.
+  Alla transizione nominal/compliant/torque_limit → stop:
+    - congela g_proj al valore corrente (snapshot pre-stop)
 
-Topics:
+  Alla transizione stop → qualsiasi altra modalità:
+    - ripristina il comportamento normale (PD+ completo)
+
+Topics
+------
   Sub:  /joint_states             sensor_msgs/JointState
         /trajectory_ref           std_msgs/Float64MultiArray
         /exo_dynamics/ff_terms    std_msgs/Float64MultiArray
@@ -35,13 +74,16 @@ Topics:
   Pub:  /torque                   std_msgs/Float64
         /traj_ctrl/debug          std_msgs/Float64MultiArray
 
-Parametri ROS2:
-  joint_name        (str,   default 'rev_crank')
-  Kp                (float, default 50.0)
-  Kd                (float, default 5.0)
-  use_feedforward   (bool,  default True)
-  tau_max           (float, default 10.0)
-  publish_rate      (float, default 200.0)
+Parametri ROS2
+--------------
+  joint_name         (str,   default 'rev_crank')
+  Kp                 (float, default 50.0)
+  Kd                 (float, default 5.0)
+  use_feedforward    (bool,  default True)
+  tau_max            (float, default 10.0)
+  publish_rate       (float, default 200.0)
+  fric_visc          (float, default 2.0)       compensazione attrito viscoso
+  damping_theta      (float, default 1.0)       compensazione smorzamento
 """
 
 import rclpy
@@ -56,12 +98,19 @@ class TrajectoryController(Node):
     def __init__(self):
         super().__init__('trajectory_controller')
 
-        self.declare_parameter('joint_name',    'rev_crank')
-        self.declare_parameter('Kp',             50.0)
-        self.declare_parameter('Kd',              5.0)
-        self.declare_parameter('use_feedforward', True)
-        self.declare_parameter('tau_max',         10.0)
-        self.declare_parameter('publish_rate',   200.0)
+        self.declare_parameter('joint_name',       'rev_crank')
+        self.declare_parameter('Kp',                50.0)
+        self.declare_parameter('Kd',                 5.0)
+        self.declare_parameter('use_feedforward',   True)
+        self.declare_parameter('tau_max',           10.0)
+        self.declare_parameter('publish_rate',     200.0)
+
+        # ── Parametri compensazione attrito (solo termini lineari) ────
+        # Devono corrispondere ai parametri del plant (dynamics_params.yaml).
+        # L'attrito Coulomb NON viene compensato nel FF perché è non lineare
+        # e dissipativo: compensarlo su theta_dot_ref causa sovracompensazione.
+        self.declare_parameter('fric_visc',          2.0)
+        self.declare_parameter('damping_theta',      1.0)
 
         self.joint_name = str(self.get_parameter('joint_name').value)
         publish_rate    = float(self.get_parameter('publish_rate').value)
@@ -79,7 +128,8 @@ class TrajectoryController(Node):
 
         # Termini feed-forward dal plant
         self.M_eff          = 1.0
-        self.g_proj         = 0.0
+        self.proj           = 0.0    # B^T (M Bdot thetadot + h) — era g_proj
+        self.g_proj         = 0.0    # B^T h — mantenuto per diagnostica/stop
         self.tau_pass_theta = 0.0
         self.ff_received    = False
 
@@ -87,12 +137,7 @@ class TrajectoryController(Node):
         self.tau_out = 0.0
 
         # ── Stato modalità bridge ────────────────────────────────────
-        # Quando il bridge è in 'stop', il controller passa in holding
-        # statica: azzera PD e inerziale, usa solo g_proj congelato.
         self._bridge_mode: str   = 'nominal'
-        # g_proj snapshot al momento dell'ingresso in stop:
-        # congela il termine gravitazionale alla configurazione pre-stop,
-        # indipendentemente da eventuali aggiornamenti successivi di ff_terms.
         self._g_proj_at_stop: float = 0.0
 
         # ── Subscribers ──────────────────────────────────────────────
@@ -115,7 +160,9 @@ class TrajectoryController(Node):
             f'TrajectoryController avviato | '
             f'Kp={self.get_parameter("Kp").value} '
             f'Kd={self.get_parameter("Kd").value} '
-            f'use_feedforward={self.get_parameter("use_feedforward").value}'
+            f'use_feedforward={self.get_parameter("use_feedforward").value} '
+            f'fric_visc={self.get_parameter("fric_visc").value} '
+            f'damping={self.get_parameter("damping_theta").value}'
         )
 
     # ── Callbacks ────────────────────────────────────────────────────
@@ -139,10 +186,19 @@ class TrajectoryController(Node):
         self.ref_received   = True
 
     def _ff_terms_cb(self, msg: Float64MultiArray):
+        """
+        Layout /exo_dynamics/ff_terms:
+          [0] denom  = M_eff = B^T M B + Jm
+          [1] proj   = B^T (M Ḃ θ̇ + h)     ← include Coriolis + gravità + Bdot
+          [2] g_proj = B^T h                ← solo nonLinearEffects (gravità + Coriolis)
+          [3] tau_pass_theta
+        """
         d = msg.data
         if len(d) > 0:
             M = float(d[0])
             self.M_eff = M if M > 1e-6 else 1.0
+        if len(d) > 1:
+            self.proj = float(d[1])
         if len(d) > 2:
             self.g_proj = float(d[2])
         if len(d) > 3:
@@ -167,7 +223,6 @@ class TrajectoryController(Node):
             return
 
         if new_mode == 'stop' and prev_mode != 'stop':
-            # Snapshot di g_proj al momento dell'ingresso in stop
             self._g_proj_at_stop = self.g_proj
             self.get_logger().warn(
                 f'TrajectoryController: bridge → STOP | '
@@ -194,14 +249,6 @@ class TrajectoryController(Node):
         tau_max = float(self.get_parameter('tau_max').value)
 
         # ── Modalità STOP: holding statica ───────────────────────────
-        # Quando il bridge è in stop, non usare il termine PD né
-        # il termine inerziale. Usare solo il g_proj snapshot pre-stop
-        # per contrastare la gravità staticamente.
-        #
-        # Motivazione: se theta è congelato da fault injection (canale 3),
-        # e_theta = 0 ma g_proj e tau_pass_theta continuano ad aggiornarsi
-        # con la q reale del plant. Passare tau_ff variabile al bridge in
-        # hold_only produrrebbe una coppia inattesa che muove il dito.
         if self._bridge_mode == 'stop':
             tau_raw = self._g_proj_at_stop
             tau_clamped = float(max(-tau_max, min(tau_max, tau_raw)))
@@ -211,18 +258,16 @@ class TrajectoryController(Node):
             msg_tau.data = tau_clamped
             self.pub_tau.publish(msg_tau)
 
-            # Diagnostica in stop: campi PD e ff variabili a zero,
-            # tau_ff mostra il g_proj snapshot usato
             diag = Float64MultiArray()
             diag.data = [
                 self.theta_ref,
                 self.theta,
-                0.0,                    # e_theta forzato a 0 in stop
+                0.0,
                 self.theta_dot_ref,
                 self.theta_dot,
-                0.0,                    # e_theta_dot forzato a 0 in stop
-                0.0,                    # tau_pd = 0
-                self._g_proj_at_stop,   # tau_ff = solo g_proj snapshot
+                0.0,
+                0.0,
+                self._g_proj_at_stop,
                 tau_raw,
                 tau_clamped,
                 self.M_eff,
@@ -232,7 +277,8 @@ class TrajectoryController(Node):
             self.pub_diag.publish(diag)
             return
 
-        # ── Modalità normale: PD+ completo ───────────────────────────
+        # ── Modalità normale: PD + feedforward completo ──────────────
+
         e_theta     = self.theta_ref     - self.theta
         e_theta_dot = self.theta_dot_ref - self.theta_dot
 
@@ -240,10 +286,32 @@ class TrajectoryController(Node):
 
         tau_ff = 0.0
         if use_ff and self.ff_received:
+            # ── Parametri attrito (solo termini lineari) ───────────
+            b_visc  = float(self.get_parameter('fric_visc').value)
+            d_theta = float(self.get_parameter('damping_theta').value)
+
+            # Compensazione attrito lineare sulla velocità di RIFERIMENTO
+            # (evita loop algebrico con la misura).
+            # L'attrito Coulomb NON viene compensato: è non lineare,
+            # agisce su θ̇ reale (non θ̇_ref), e compensarlo in FF
+            # causa sovracompensazione con gradini di ±fric_coul Nm.
+            tau_visc_ff = b_visc * self.theta_dot_ref
+            tau_damp_ff = d_theta * self.theta_dot_ref
+
+            # ── Feedforward ──────────────────────────────────────────
+            #
+            # Dal modello del plant:
+            #   τ_m = M_eff·θ̈ + proj + τ_fric + τ_damp - τ_pass - τ_ext
+            #
+            # FF (senza τ_ext né Coulomb):
+            #   τ_ff = M_eff·θ̈_ref + proj - τ_pass + τ_visc_ref + τ_damp_ref
+            #
             tau_ff = (
                 self.M_eff * self.theta_ddot_ref
-                + self.g_proj
-                + self.tau_pass_theta
+                + self.proj                  # B^T(M·Ḃ·θ̇ + h): gravità + Coriolis + Bdot
+                - self.tau_pass_theta        # segno CORRETTO: il plant lo somma, noi lo sottraiamo
+                + tau_visc_ff                # compensazione attrito viscoso (lineare)
+                + tau_damp_ff                # compensazione smorzamento (lineare)
             )
 
         tau_raw = tau_pd + tau_ff

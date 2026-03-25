@@ -118,15 +118,20 @@ void StateMachine::publish_status()
   msg.fault_present     = fault_present_;
   msg.last_fault_reason = last_fault_reason_;
 
-  msg.counter_exit_compliant    = counter_exit_compliant_;
-  msg.counter_exit_torque_limit = counter_exit_torque_limit_;
-  msg.downgrade_threshold       = downgrade_count_threshold_;
+  msg.automatic_downgrade_enabled = enable_automatic_downgrade_;
 
-  msg.downgrade_progress_compliant = downgrade_count_threshold_ > 0 ?
-    100.0 * counter_exit_compliant_ / downgrade_count_threshold_ : 0.0;
+  if (enable_automatic_downgrade_) {
+    msg.counter_exit_compliant    = counter_exit_compliant_;
+    msg.counter_exit_torque_limit = counter_exit_torque_limit_;
+    msg.downgrade_threshold       = downgrade_count_threshold_;
 
-  msg.downgrade_progress_torque_limit = downgrade_count_threshold_ > 0 ?
-    100.0 * counter_exit_torque_limit_ / downgrade_count_threshold_ : 0.0;
+    msg.downgrade_progress_compliant = downgrade_count_threshold_ > 0 ?
+      100.0 * counter_exit_compliant_ / downgrade_count_threshold_ : 0.0;
+
+    msg.downgrade_progress_torque_limit = downgrade_count_threshold_ > 0 ?
+      100.0 * counter_exit_torque_limit_ / downgrade_count_threshold_ : 0.0;
+  }
+  // Se disabilitato, i campi restano ai valori default (0 / 0.0)
 
   msg.last_transition_time   = last_transition_time_;
   msg.last_transition_reason = last_transition_reason_;

@@ -13,12 +13,15 @@ bool    safe_stop_latched
 bool    fault_present
 string  last_fault_reason
 
-# Contatori downgrade
+# Downgrade automatico
+# Se false, i campi counter_* / downgrade_* sono a zero e vanno ignorati.
+# Le transizioni verso stati meno restrittivi avvengono solo via servizi ROS.
+bool    automatic_downgrade_enabled
+
+# Contatori downgrade (significativi solo se automatic_downgrade_enabled = true)
 int32   counter_exit_compliant
 int32   counter_exit_torque_limit
 int32   downgrade_threshold
-
-# Progressione downgrade in percentuale [0.0, 100.0]
 float64 downgrade_progress_compliant
 float64 downgrade_progress_torque_limit
 
