@@ -79,7 +79,7 @@ class AdmittanceController(Node):
         self.declare_parameter('D_virt',          5.0)
         self.declare_parameter('K_virt',          2.0)
         self.declare_parameter('theta_eq',        0.0)
-        self.declare_parameter('force_deadband',  0.1)
+        self.declare_parameter('force_deadband',  0.0)
         self.declare_parameter('theta_ref_min',  -2.0)
         self.declare_parameter('theta_ref_max',   2.0)
         self.declare_parameter('theta_dot_max',   5.0)

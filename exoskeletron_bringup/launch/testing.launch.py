@@ -48,7 +48,7 @@ def generate_launch_description():
         # Input su /exo_dynamics/external_wrench
         Node(
             package='exoskeletron_utils',
-            executable='external_wrench_pub',
+            executable='external_wrench_step',
             name='input',
             output='screen',
         ),
@@ -79,12 +79,5 @@ def generate_launch_description():
             output='screen',
         ),
 
-        Node(
-            package='exoskeletron_dynamics',
-            executable='ekf_observer',
-            name='ekf_observer',
-            output='screen',
-            parameters=[observer_params_file]
-        ),
 
     ])

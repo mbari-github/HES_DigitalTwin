@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'exo_dynamics = exoskeletron_dynamics.new_dynamics_with_hand:main',
+            'dynamics_stripped = exoskeletron_dynamics.dynamics_stripped:main',
         ],
     },
 )

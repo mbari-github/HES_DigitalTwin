@@ -27,7 +27,7 @@ def generate_launch_description():
         # ── Dinamica dell'esoscheletro ────────────────────────────
         Node(
             package='exoskeletron_dynamics',
-            executable='exo_dynamics',
+            executable='dynamics_stripped',
             name='dynamics',
             output='screen',
         ),
@@ -41,10 +41,9 @@ def generate_launch_description():
             arguments=['-d', os.path.join(description_pkg, 'rviz', 'exo_display.rviz')],
         ),
 
-        # ── Input sinusoidale (external_wrench_pub) ───────────────
         Node(
             package='exoskeletron_utils',
-            executable='external_wrench_pub',
+            executable='external_wrench_step',
             name='input',
             output='screen',
         ),
@@ -55,6 +54,9 @@ def generate_launch_description():
             executable='admittance_controller',
             name='admittance_controller',
             output='screen',
+            parameters=[{
+            'force_deadband': 0.0,
+            }],
         ),
 
         # ── Trajectory Controller (inner loop: PD + feedforward) ──
