@@ -10,6 +10,8 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/test',
+            ['test/test_exo_bridge_launch.py']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -20,11 +22,12 @@ setup(
     extras_require={
         'test': [
             'pytest',
+            'launch_testing',
         ],
     },
-        entry_points={
+    entry_points={
         'console_scripts': [
             'exo_bridge = exoskeletron_supervision.exo_bridge:main',
-            ],
-        },
+        ],
+    },
 )

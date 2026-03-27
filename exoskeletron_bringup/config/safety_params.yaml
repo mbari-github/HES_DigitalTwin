@@ -48,3 +48,7 @@ state_machine:
     # Con K=5: serve il 83% di campioni positivi per avanzare
     fault_monitor.downgrade_negative_weight:  5
 
+# ── Watchdog sulla liveness del bridge [s] ──────────────────────────
+    bridge_liveness_timeout_sec: 0.5
+    bridge_liveness_grace_sec:   3.0
+

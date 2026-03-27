@@ -19,6 +19,10 @@ StateMachine::StateMachine()
   this->declare_parameter("fault_monitor.downgrade_count_threshold", 2000);
   this->declare_parameter("fault_monitor.downgrade_negative_weight", 5);
 
+  // FIX 2: parametri bridge liveness
+  this->declare_parameter("bridge_liveness_timeout_sec", 0.5);
+  this->declare_parameter("bridge_liveness_grace_sec",   3.0);
+
   enable_automatic_downgrade_ =
     this->get_parameter("fault_monitor.enable_automatic_downgrade").as_bool();
   tau_compliant_exit_    = this->get_parameter("fault_monitor.tau_compliant_exit").as_double();
@@ -30,7 +34,13 @@ StateMachine::StateMachine()
   downgrade_negative_weight_ =
     this->get_parameter("fault_monitor.downgrade_negative_weight").as_int();
 
+  bridge_liveness_timeout_ =
+    this->get_parameter("bridge_liveness_timeout_sec").as_double();
+  bridge_liveness_grace_ =
+    this->get_parameter("bridge_liveness_grace_sec").as_double();
+
   last_transition_time_ = this->now();
+  last_bridge_status_time_ = this->now();
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -66,7 +76,7 @@ void StateMachine::initialize()
     std::bind(&StateMachine::reset_safety_callback, this,
       std::placeholders::_1, std::placeholders::_2));
 
-  // ── Subscription per downgrade ───────────────────────────────────
+  // ── Subscription per downgrade + liveness + coherence ────────────
   bridge_status_sub_ =
     this->create_subscription<std_msgs::msg::Float64MultiArray>(
       "/exo_bridge/status", 10,
@@ -80,34 +90,42 @@ void StateMachine::initialize()
   status_pub_ = this->create_publisher<exoskeletron_safety_msgs::msg::SafetyStatus>(
     "/safety_manager/status", 10);
 
-  // Pubblica a 10Hz anche senza cambi di stato
+  // Pubblica a 10Hz — ora include anche il check bridge liveness
   status_timer_ = this->create_wall_timer(
     std::chrono::milliseconds(100),
     std::bind(&StateMachine::publish_status, this));
 
   RCLCPP_INFO(this->get_logger(),
     "StateMachine initialized | state_topic=/safety_manager/state\n"
-    "  automatic_downgrade     = %s\n"
-    "  tau_compliant_exit      = %.2f Nm\n"
-    "  tau_torque_limit_exit   = %.2f Nm\n"
-    "  vel_compliant_exit      = %.2f rad/s\n"
-    "  vel_torque_limit_exit   = %.2f rad/s\n"
-    "  downgrade_threshold     = %d samples (%.1fs @ 200Hz)\n"
-    "  downgrade_neg_weight    = %d",
+    "  automatic_downgrade       = %s\n"
+    "  tau_compliant_exit        = %.2f Nm\n"
+    "  tau_torque_limit_exit     = %.2f Nm\n"
+    "  vel_compliant_exit        = %.2f rad/s\n"
+    "  vel_torque_limit_exit     = %.2f rad/s\n"
+    "  downgrade_threshold       = %d samples (%.1fs @ 200Hz)\n"
+    "  downgrade_neg_weight      = %d\n"
+    "  bridge_liveness_timeout   = %.2fs\n"
+    "  bridge_liveness_grace     = %.2fs",
     enable_automatic_downgrade_ ? "ENABLED" : "DISABLED",
     tau_compliant_exit_, tau_torque_limit_exit_,
     vel_compliant_exit_, vel_torque_limit_exit_,
     downgrade_count_threshold_,
     downgrade_count_threshold_ / 200.0,
-    downgrade_negative_weight_);
+    downgrade_negative_weight_,
+    bridge_liveness_timeout_,
+    bridge_liveness_grace_);
 }
 
 // ════════════════════════════════════════════════════════════════════
-// Publisher stato
+// Publisher stato — ora include bridge liveness check
 // ════════════════════════════════════════════════════════════════════
 
 void StateMachine::publish_status()
 {
+  // FIX 2: controlla bridge liveness a ogni tick (10Hz).
+  // Riusa il timer esistente, nessun timer aggiuntivo.
+  check_bridge_liveness();
+
   if (!status_pub_) return;
 
   exoskeletron_safety_msgs::msg::SafetyStatus msg;
@@ -131,7 +149,10 @@ void StateMachine::publish_status()
     msg.downgrade_progress_torque_limit = downgrade_count_threshold_ > 0 ?
       100.0 * counter_exit_torque_limit_ / downgrade_count_threshold_ : 0.0;
   }
-  // Se disabilitato, i campi restano ai valori default (0 / 0.0)
+
+  // FIX 4: nuovi campi diagnostici
+  msg.bridge_alive          = bridge_alive_;
+  msg.bridge_mode_coherent  = bridge_mode_coherent_;
 
   msg.last_transition_time   = last_transition_time_;
   msg.last_transition_reason = last_transition_reason_;
@@ -146,167 +167,6 @@ void StateMachine::publish_status_string()
   std_msgs::msg::String msg;
   msg.data = state_to_string(current_state_);
   state_string_pub_->publish(msg);
-}
-
-// ════════════════════════════════════════════════════════════════════
-// Downgrade automatico
-// ════════════════════════════════════════════════════════════════════
-//
-// Downgrade: usa tau_out (data[5], coppia post-clamp) e theta_dot (data[3]).
-//
-// Perché tau_out e non tau_raw:
-// Quando il bridge è in torque_limit, la coppia è clampata a override_tau_limit.
-// Il controller PD in closed-loop reagisce alla coppia clampata producendo una
-// tau_raw sempre più alta (il plant non si muove abbastanza → errore cresce →
-// tau cresce). Quindi tau_raw resta elevata per TUTTA la durata della mode,
-// anche dopo la rimozione del fault, rendendo il downgrade impossibile.
-//
-// tau_out riflette lo stato REALE del sistema: se il fault è stato rimosso e
-// il plant converge, tau_out scende naturalmente. Se il fault è ancora attivo,
-// tau_out resta al limite del clamp (= override_tau_limit), e il downgrade
-// avviene solo se override_tau_limit < tau_torque_limit_exit, che è vero
-// nella configurazione attuale (2.0 < 2.5 Nm).
-//
-// NOTA: il downgrade con tau_out funziona correttamente SOLO se le soglie
-// di uscita sono coerenti con i limiti di coppia del bridge:
-//   override_tau_limit (2.0) < tau_torque_limit_exit (2.5)  ✓
-//   compliant_tau_limit (4.0) > tau_compliant_exit (1.5)    ✗ ← attenzione!
-//
-// Per il compliant mode: compliant_tau_limit (4.0) è SOPRA tau_compliant_exit
-// (1.5), quindi il downgrade dipende dal fatto che il controller converga e
-// produca meno di 1.5 Nm dopo la rimozione del fault. Se il fault è ancora
-// attivo, la tau_out può restare sopra soglia e il downgrade non avviene.
-// Questo è il comportamento corretto: con fault attivo non si deve fare
-// downgrade.
-//
-// Layout dello status:
-//   data[0] = is_stop          data[4] = theta_hold
-//   data[1] = is_limited       data[5] = tau_out (post-clamp)
-//   data[2] = theta            data[6] = tau_ext_theta
-//   data[3] = theta_dot        data[7] = mode_id
-//   data[8] = tau_raw (pre-clamp, disponibile per diagnostica)
-
-void StateMachine::bridge_status_callback(
-  const std_msgs::msg::Float64MultiArray::SharedPtr msg)
-{
-  if (msg->data.size() < 9) return;
-
-  // Se il downgrade automatico è disabilitato, non valutare.
-  // Le transizioni verso stati meno restrittivi avverranno solo
-  // tramite i servizi ROS manuali (/compliant_mode_request data:=false,
-  // /torque_limit_request data:=false, /reset_safety_request).
-  if (!enable_automatic_downgrade_) return;
-
-  if (current_state_ != functional_safety::SafetyState::COMPLIANT_MODE &&
-      current_state_ != functional_safety::SafetyState::TORQUE_LIMIT_MODE) {
-    reset_downgrade_counters();
-    return;
-  }
-
-  if (safe_stop_latched_) return;
-
-  const double theta_dot = msg->data[3];
-  const double tau_out   = msg->data[5];
-
-  evaluate_downgrade(tau_out, theta_dot);
-}
-
-void StateMachine::evaluate_downgrade(double tau_in, double theta_dot)
-{
-  const double abs_tau = std::abs(tau_in);
-  const double abs_vel = std::abs(theta_dot);
-
-  // ── Da TORQUE_LIMIT ──────────────────────────────────────────────
-  if (current_state_ == functional_safety::SafetyState::TORQUE_LIMIT_MODE) {
-    const bool positive = (abs_tau < tau_torque_limit_exit_) &&
-                          (abs_vel < vel_torque_limit_exit_);
-
-    if (positive) {
-      counter_exit_torque_limit_ = std::min(
-        counter_exit_torque_limit_ + 1,
-        downgrade_count_threshold_);
-    } else {
-      counter_exit_torque_limit_ = std::max(
-        counter_exit_torque_limit_ - downgrade_negative_weight_, 0);
-    }
-
-    if (counter_exit_torque_limit_ % 200 == 0 &&
-        counter_exit_torque_limit_ > 0) {
-      RCLCPP_INFO(this->get_logger(),
-        "Downgrade progress [TORQUE_LIMIT]: %d/%d (%.1f%%)",
-        counter_exit_torque_limit_,
-        downgrade_count_threshold_,
-        100.0 * counter_exit_torque_limit_ / downgrade_count_threshold_);
-    }
-
-    if (counter_exit_torque_limit_ >= downgrade_count_threshold_) {
-      counter_exit_torque_limit_ = 0;
-      counter_exit_compliant_    = 0;
-
-      if (abs_tau < tau_compliant_exit_ && abs_vel < vel_compliant_exit_) {
-        RCLCPP_INFO(this->get_logger(),
-          "Downgrade: TORQUE_LIMIT -> FAULT_MONITOR | tau_raw=%.3f vel=%.3f",
-          tau_in, theta_dot);
-        fault_present_ = false;
-        // FIX BUG 3: usa request_state_change per passare per la matrice
-        // di transizione e i check su safe_stop_latched / transition_in_progress
-        request_state_change(
-          functional_safety::SafetyState::FAULT_MONITOR,
-          "downgrade_torque_limit_to_nominal");
-      } else {
-        RCLCPP_INFO(this->get_logger(),
-          "Downgrade: TORQUE_LIMIT -> COMPLIANT | tau_raw=%.3f vel=%.3f",
-          tau_in, theta_dot);
-        // FIX BUG 3: usa request_state_change
-        request_state_change(
-          functional_safety::SafetyState::COMPLIANT_MODE,
-          "downgrade_torque_limit_to_compliant");
-      }
-    }
-    return;
-  }
-
-  // ── Da COMPLIANT ─────────────────────────────────────────────────
-  if (current_state_ == functional_safety::SafetyState::COMPLIANT_MODE) {
-    const bool positive = (abs_tau < tau_compliant_exit_) &&
-                          (abs_vel < vel_compliant_exit_);
-
-    if (positive) {
-      counter_exit_compliant_ = std::min(
-        counter_exit_compliant_ + 1,
-        downgrade_count_threshold_);
-    } else {
-      counter_exit_compliant_ = std::max(
-        counter_exit_compliant_ - downgrade_negative_weight_, 0);
-    }
-
-    if (counter_exit_compliant_ % 200 == 0 &&
-        counter_exit_compliant_ > 0) {
-      RCLCPP_INFO(this->get_logger(),
-        "Downgrade progress [COMPLIANT]: %d/%d (%.1f%%)",
-        counter_exit_compliant_,
-        downgrade_count_threshold_,
-        100.0 * counter_exit_compliant_ / downgrade_count_threshold_);
-    }
-
-    if (counter_exit_compliant_ >= downgrade_count_threshold_) {
-      counter_exit_compliant_ = 0;
-      RCLCPP_INFO(this->get_logger(),
-        "Downgrade: COMPLIANT -> FAULT_MONITOR | tau_raw=%.3f vel=%.3f",
-        tau_in, theta_dot);
-      fault_present_ = false;
-      // FIX BUG 3: usa request_state_change
-      request_state_change(
-        functional_safety::SafetyState::FAULT_MONITOR,
-        "downgrade_compliant_to_nominal");
-    }
-  }
-}
-
-void StateMachine::reset_downgrade_counters()
-{
-  counter_exit_compliant_    = 0;
-  counter_exit_torque_limit_ = 0;
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -346,6 +206,10 @@ bool StateMachine::change_state(const std::string & state, const std::string & r
     last_transition_reason_ = reason.empty() ?
       "unspecified" : reason;
     transition_in_progress_ = false;
+
+    // FIX 3: reset del contatore mismatch alla transizione, perché il
+    // bridge impiega 1-2 cicli ad aggiornare il mode_id dopo il cambio.
+    mode_mismatch_count_ = 0;
 
     RCLCPP_INFO(this->get_logger(),
       "State -> %s | reason=%s",
@@ -391,11 +255,6 @@ bool StateMachine::request_state_change(
 }
 
 // FIX BUG 1: SAFE_STOP ora permette la transizione verso FAULT_MONITOR.
-// La guardia safe_stop_latched_ impedisce comunque la transizione finché
-// il latch non viene esplicitamente rilasciato da clear_fault_state()
-// (chiamato da reset_safety_callback prima di request_state_change).
-// Questo permette di usare request_state_change anche per il reset,
-// eliminando il bypass diretto di change_state.
 bool StateMachine::can_transition_to(
   functional_safety::SafetyState target_state) const
 {
@@ -420,10 +279,6 @@ bool StateMachine::can_transition_to(
              target_state == functional_safety::SafetyState::FAULT_MONITOR     ||
              target_state == functional_safety::SafetyState::COMPLIANT_MODE;
 
-    // FIX BUG 1: SAFE_STOP → FAULT_MONITOR ora è ammessa nella matrice.
-    // La guardia safe_stop_latched_ (sopra) previene transizioni accidentali:
-    // solo dopo clear_fault_state() il latch viene rilasciato e la
-    // transizione diventa possibile.
     case functional_safety::SafetyState::SAFE_STOP:
       return target_state == functional_safety::SafetyState::SAFE_STOP    ||
              target_state == functional_safety::SafetyState::FAULT_MONITOR;
@@ -566,18 +421,6 @@ void StateMachine::torque_limit_callback(
 }
 
 // FIX BUG 1/4: reset_safety ora passa per request_state_change.
-// La sequenza è:
-//   1. clear_fault_state() → rilascia safe_stop_latched_
-//   2. request_state_change(FAULT_MONITOR) → passa per can_transition_to
-//      (che ora permette SAFE_STOP → FAULT_MONITOR quando il latch è rilasciato)
-//   3. change_state carica FaultMonitorMode, il cui initialize() NON tocca
-//      il bridge (il bridge viene portato a "nominal" dal nuovo plugin
-//      FaultMonitorMode tramite request_mode, vedi sotto)
-//
-// Nota: il FaultMonitorMode nel suo initialize() ora chiama
-// request_mode("nominal") per assicurarsi che il bridge sia in nominal
-// all'ingresso in FAULT_MONITOR. Questo risolve il coordinamento
-// bridge/state_machine.
 void StateMachine::reset_safety_callback(
   const std::shared_ptr<std_srvs::srv::Trigger::Request>,
   std::shared_ptr<std_srvs::srv::Trigger::Response> response)
@@ -588,17 +431,234 @@ void StateMachine::reset_safety_callback(
     return;
   }
 
-  // Rilascia il latch PRIMA della transizione, altrimenti
-  // can_transition_to blocca SAFE_STOP → FAULT_MONITOR
   clear_fault_state();
 
-  // Ora la transizione è possibile
   const bool ok = request_state_change(
     functional_safety::SafetyState::FAULT_MONITOR, "reset");
   response->success = ok;
   response->message = ok ?
     "Safety reset completed, returned to FAULT_MONITOR" :
     "Fault cleared but failed to return to FAULT_MONITOR";
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Bridge status callback
+// ════════════════════════════════════════════════════════════════════
+//
+// FIX 2/3: il callback ora SEMPRE (prima del return early per downgrade):
+//   1. Aggiorna last_bridge_status_time_ e bridge_alive_
+//   2. Verifica coerenza mode_id vs current_state_
+//
+// Il resto (downgrade automatico) è invariato.
+
+void StateMachine::bridge_status_callback(
+  const std_msgs::msg::Float64MultiArray::SharedPtr msg)
+{
+  if (msg->data.size() < 9) return;
+
+  // ── FIX 2: aggiorna liveness (SEMPRE) ───────────────────────────
+  last_bridge_status_time_ = this->now();
+  bridge_ever_seen_ = true;
+  bridge_alive_ = true;
+
+  // ── FIX 3: verifica coerenza mode_id (SEMPRE) ──────────────────
+  // Salta durante le transizioni: il bridge impiega 1-2 cicli
+  // ad aggiornare il mode_id dopo il cambio.
+  const int bridge_mode_id = static_cast<int>(msg->data[7]);
+  const int expected_id    = expected_bridge_mode_id();
+
+  if (bridge_mode_id != expected_id && !transition_in_progress_) {
+    mode_mismatch_count_++;
+    bridge_mode_coherent_ = false;
+    if (mode_mismatch_count_ >= mode_mismatch_threshold_) {
+      RCLCPP_ERROR(this->get_logger(),
+        "Bridge mode MISMATCH sustained | bridge_mode_id=%d "
+        "expected=%d (state=%s) | %d consecutive → SAFE_STOP",
+        bridge_mode_id, expected_id,
+        state_to_string(current_state_).c_str(),
+        mode_mismatch_count_);
+      mode_mismatch_count_ = 0;
+      request_state_change(
+        functional_safety::SafetyState::SAFE_STOP,
+        "bridge_mode_mismatch");
+      return;
+    }
+  } else {
+    mode_mismatch_count_ = 0;
+    bridge_mode_coherent_ = true;
+  }
+
+  // ── Downgrade automatico (logica originale invariata) ────────────
+  if (!enable_automatic_downgrade_) return;
+
+  if (current_state_ != functional_safety::SafetyState::COMPLIANT_MODE &&
+      current_state_ != functional_safety::SafetyState::TORQUE_LIMIT_MODE) {
+    reset_downgrade_counters();
+    return;
+  }
+
+  if (safe_stop_latched_) return;
+
+  const double theta_dot = msg->data[3];
+  const double tau_out   = msg->data[5];
+
+  evaluate_downgrade(tau_out, theta_dot);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Downgrade automatico (invariato rispetto all'originale)
+// ════════════════════════════════════════════════════════════════════
+
+void StateMachine::evaluate_downgrade(double tau_in, double theta_dot)
+{
+  const double abs_tau = std::abs(tau_in);
+  const double abs_vel = std::abs(theta_dot);
+
+  // ── Da TORQUE_LIMIT ──────────────────────────────────────────────
+  if (current_state_ == functional_safety::SafetyState::TORQUE_LIMIT_MODE) {
+    const bool positive = (abs_tau < tau_torque_limit_exit_) &&
+                          (abs_vel < vel_torque_limit_exit_);
+
+    if (positive) {
+      counter_exit_torque_limit_ = std::min(
+        counter_exit_torque_limit_ + 1,
+        downgrade_count_threshold_);
+    } else {
+      counter_exit_torque_limit_ = std::max(
+        counter_exit_torque_limit_ - downgrade_negative_weight_, 0);
+    }
+
+    if (counter_exit_torque_limit_ % 200 == 0 &&
+        counter_exit_torque_limit_ > 0) {
+      RCLCPP_INFO(this->get_logger(),
+        "Downgrade progress [TORQUE_LIMIT]: %d/%d (%.1f%%)",
+        counter_exit_torque_limit_,
+        downgrade_count_threshold_,
+        100.0 * counter_exit_torque_limit_ / downgrade_count_threshold_);
+    }
+
+    if (counter_exit_torque_limit_ >= downgrade_count_threshold_) {
+      counter_exit_torque_limit_ = 0;
+      counter_exit_compliant_    = 0;
+
+      if (abs_tau < tau_compliant_exit_ && abs_vel < vel_compliant_exit_) {
+        RCLCPP_INFO(this->get_logger(),
+          "Downgrade: TORQUE_LIMIT -> FAULT_MONITOR | tau_raw=%.3f vel=%.3f",
+          tau_in, theta_dot);
+        fault_present_ = false;
+        request_state_change(
+          functional_safety::SafetyState::FAULT_MONITOR,
+          "downgrade_torque_limit_to_nominal");
+      } else {
+        RCLCPP_INFO(this->get_logger(),
+          "Downgrade: TORQUE_LIMIT -> COMPLIANT | tau_raw=%.3f vel=%.3f",
+          tau_in, theta_dot);
+        request_state_change(
+          functional_safety::SafetyState::COMPLIANT_MODE,
+          "downgrade_torque_limit_to_compliant");
+      }
+    }
+    return;
+  }
+
+  // ── Da COMPLIANT ─────────────────────────────────────────────────
+  if (current_state_ == functional_safety::SafetyState::COMPLIANT_MODE) {
+    const bool positive = (abs_tau < tau_compliant_exit_) &&
+                          (abs_vel < vel_compliant_exit_);
+
+    if (positive) {
+      counter_exit_compliant_ = std::min(
+        counter_exit_compliant_ + 1,
+        downgrade_count_threshold_);
+    } else {
+      counter_exit_compliant_ = std::max(
+        counter_exit_compliant_ - downgrade_negative_weight_, 0);
+    }
+
+    if (counter_exit_compliant_ % 200 == 0 &&
+        counter_exit_compliant_ > 0) {
+      RCLCPP_INFO(this->get_logger(),
+        "Downgrade progress [COMPLIANT]: %d/%d (%.1f%%)",
+        counter_exit_compliant_,
+        downgrade_count_threshold_,
+        100.0 * counter_exit_compliant_ / downgrade_count_threshold_);
+    }
+
+    if (counter_exit_compliant_ >= downgrade_count_threshold_) {
+      counter_exit_compliant_ = 0;
+      RCLCPP_INFO(this->get_logger(),
+        "Downgrade: COMPLIANT -> FAULT_MONITOR | tau_raw=%.3f vel=%.3f",
+        tau_in, theta_dot);
+      fault_present_ = false;
+      request_state_change(
+        functional_safety::SafetyState::FAULT_MONITOR,
+        "downgrade_compliant_to_nominal");
+    }
+  }
+}
+
+void StateMachine::reset_downgrade_counters()
+{
+  counter_exit_compliant_    = 0;
+  counter_exit_torque_limit_ = 0;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// FIX 2: Bridge liveness check (chiamato da publish_status a 10Hz)
+// ════════════════════════════════════════════════════════════════════
+
+int StateMachine::expected_bridge_mode_id() const
+{
+  switch (current_state_) {
+    case functional_safety::SafetyState::FAULT_MONITOR:     return 0;
+    case functional_safety::SafetyState::TORQUE_LIMIT_MODE: return 1;
+    case functional_safety::SafetyState::COMPLIANT_MODE:    return 2;
+    case functional_safety::SafetyState::SAFE_STOP:         return 3;
+    default: return -1;
+  }
+}
+
+void StateMachine::check_bridge_liveness()
+{
+  // Grace period all'avvio
+  const double uptime = (this->now() - last_transition_time_).seconds();
+  if (uptime < bridge_liveness_grace_ && !bridge_ever_seen_) {
+    return;
+  }
+
+  // Mai visto il bridge dopo il grace period
+  if (!bridge_ever_seen_) {
+    RCLCPP_ERROR(this->get_logger(),
+      "Bridge NEVER seen after %.1fs grace → SAFE_STOP",
+      bridge_liveness_grace_);
+    bridge_ever_seen_ = true;  // evita spam
+    bridge_alive_ = false;
+    request_state_change(
+      functional_safety::SafetyState::SAFE_STOP,
+      "bridge_never_seen");
+    return;
+  }
+
+  // Verifica età ultimo messaggio
+  const double age =
+    (this->now() - last_bridge_status_time_).seconds();
+
+  if (age > bridge_liveness_timeout_) {
+    bridge_alive_ = false;
+
+    // Già in SAFE_STOP? Non ri-escalare, ma logga una volta
+    if (current_state_ == functional_safety::SafetyState::SAFE_STOP) {
+      return;
+    }
+
+    RCLCPP_ERROR(this->get_logger(),
+      "Bridge status TIMEOUT | age=%.3fs > timeout=%.3fs → SAFE_STOP",
+      age, bridge_liveness_timeout_);
+
+    request_state_change(
+      functional_safety::SafetyState::SAFE_STOP,
+      "bridge_liveness_timeout");
+  }
 }
 
 }  // namespace functional_safety

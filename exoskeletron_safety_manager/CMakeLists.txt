@@ -72,4 +72,12 @@ ament_export_include_directories(include)
 ament_export_libraries(safety_plugins)
 ament_export_dependencies(rclcpp pluginlib std_srvs std_msgs exoskeletron_safety_msgs)
 
+if(BUILD_TESTING)
+  find_package(launch_testing_ament_cmake REQUIRED)
+  add_launch_test(
+    test/test_state_machine_launch.py
+    TIMEOUT 120
+  )
+endif()
+
 ament_package()

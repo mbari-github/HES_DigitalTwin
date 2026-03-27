@@ -25,6 +25,12 @@ int32   downgrade_threshold
 float64 downgrade_progress_compliant
 float64 downgrade_progress_torque_limit
 
+# Bridge supervision (FIX 2/3)
+# bridge_alive: true se /exo_bridge/status è stato ricevuto entro il timeout
+# bridge_mode_coherent: true se il mode_id del bridge corrisponde allo stato SM
+bool    bridge_alive
+bool    bridge_mode_coherent
+
 # Timestamp e motivo ultimo cambio di stato
 builtin_interfaces/Time last_transition_time
 string  last_transition_reason

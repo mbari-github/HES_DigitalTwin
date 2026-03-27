@@ -66,6 +66,10 @@ private:
   void evaluate_downgrade(double tau_in, double theta_dot);
   void reset_downgrade_counters();
 
+  // ── Bridge supervision (FIX 2/3) ────────────────────────────────
+  int expected_bridge_mode_id() const;
+  void check_bridge_liveness();
+
   // ── Publisher stato ──────────────────────────────────────────────
   void publish_status();
   void publish_status_string();
@@ -105,8 +109,6 @@ private:
   rclcpp::Time last_transition_time_;
 
   // ── Downgrade automatico ─────────────────────────────────────────
-  // Se false, le transizioni verso stati meno restrittivi avvengono
-  // solo tramite servizi ROS manuali. Default: false (disabilitato).
   bool enable_automatic_downgrade_ {false};
 
   double tau_compliant_exit_    {1.5};
@@ -119,6 +121,27 @@ private:
 
   int counter_exit_compliant_    {0};
   int counter_exit_torque_limit_ {0};
+
+  // ── Bridge supervision (FIX 2/3) ────────────────────────────────
+  //
+  // Liveness: aggiornato ad ogni ricezione di /exo_bridge/status.
+  // Controllato dentro publish_status() (già a 10Hz) — nessun timer extra.
+  // Se l'età supera bridge_liveness_timeout_ → SAFE_STOP.
+  //
+  // Mode coherence: contatore di mismatch consecutivi tra mode_id
+  // del bridge (data[7]) e lo stato atteso dalla SM.
+  // Se supera mode_mismatch_threshold_ → SAFE_STOP.
+
+  rclcpp::Time last_bridge_status_time_;
+  bool bridge_ever_seen_       {false};
+  bool bridge_alive_           {false};
+  bool bridge_mode_coherent_   {true};
+
+  double bridge_liveness_timeout_ {0.5};
+  double bridge_liveness_grace_   {3.0};
+
+  int mode_mismatch_count_     {0};
+  static constexpr int mode_mismatch_threshold_ = 10;
 };
 
 }  // namespace functional_safety
