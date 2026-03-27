@@ -1,0 +1,25 @@
+observer_node:
+  ros__parameters:
+
+    joint_name: rev_crank
+    publish_rate: 200.0
+
+    # ── Plant ───────────────────────────────────────────────
+    fric_visc: 2.0
+    fric_coul: 2.0
+    fric_eps: 0.005
+    damping_theta: 1.0
+
+    # ── Observer 1 ──────────────────────────────────────────
+    obs1_pole_1: -15.0
+    obs1_pole_2: -20.0
+
+    # ── Observer 2 — Admittance Inversion ───────────────────
+    adm_M_virt: 0.5
+    adm_D_virt: 5.0
+    adm_K_virt: 2.0
+    adm_theta_eq: 0.0
+
+    # ── Residual filter ─────────────────────────────────────
+    residual_filter_alpha: 0.05
+    rms_window: 50

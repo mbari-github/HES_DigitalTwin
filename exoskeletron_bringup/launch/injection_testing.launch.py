@@ -11,6 +11,9 @@ def generate_launch_description():
 
     urdf_file = os.path.join(description_pkg, 'urdf', 'assembly_with_hand.urdf')
 
+    bringup_pkg = get_package_share_directory('exoskeletron_bringup')
+    observer_params_file = os.path.join(bringup_pkg, 'config', 'observer_params.yaml')
+
     with open(urdf_file, 'r') as infp:
         robot_description_content = infp.read()
 
@@ -24,13 +27,13 @@ def generate_launch_description():
     #   3 → /joint_states
 
     FAULT_CHANNEL       = 0
-    FAULT_TYPE          = 'freeze'
-    FAULT_MAGNITUDE     = 0.0
+    FAULT_TYPE          = 'offset'
+    FAULT_MAGNITUDE     = 2.0
     FAULT_ACTIVE        = False
     NOISE_STD           = 0.1
     SPIKE_DURATION      = 0.05
     TARGET_INDEX        = 0
-    FAULT_JS_FIELD      = 'both'
+    FAULT_JS_FIELD      = 'position'
     JOINT_NAME          = 'rev_crank'
 
     # ------------------------------------------------------------
@@ -178,6 +181,15 @@ def generate_launch_description():
             executable='external_wrench_pub',
             name='input',
             output='screen',
+        ),
+
+        Node(
+            package='exoskeletron_observers',
+            executable='observer_node',
+            name='observer_node',
+            output='screen',
+            parameters=[observer_params_file],
+            remappings=observer_remaps,
         ),
 
         Node(
