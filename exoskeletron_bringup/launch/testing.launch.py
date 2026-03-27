@@ -11,7 +11,6 @@ def generate_launch_description():
 
 
     urdf_file = os.path.join(description_pkg, 'urdf', 'assembly_with_hand.urdf')
-    observer_params_file = os.path.join(launch_pkg, 'config', 'observer_params.yaml')
 
 
     # Legge il contenuto del file URDF

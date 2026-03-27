@@ -10,7 +10,6 @@ def generate_launch_description():
     launch_pkg = get_package_share_directory('exoskeletron_bringup')
 
     urdf_file = os.path.join(description_pkg, 'urdf', 'assembly_with_hand.urdf')
-    observer_params_file = os.path.join(launch_pkg, 'config', 'observer_params.yaml')
 
     with open(urdf_file, 'r') as infp:
         robot_description_content = infp.read()
@@ -179,15 +178,6 @@ def generate_launch_description():
             executable='external_wrench_pub',
             name='input',
             output='screen',
-        ),
-
-        Node(
-            package='exoskeletron_dynamics',
-            executable='ekf_observer',
-            name='ekf_observer',
-            output='screen',
-            parameters=[observer_params_file],
-            remappings=observer_remaps
         ),
 
         Node(
