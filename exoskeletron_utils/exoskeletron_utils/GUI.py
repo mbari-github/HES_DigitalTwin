@@ -60,8 +60,9 @@ def main(args=None):
     node = SimpleTorqueGUI()
     
     try:
-        # Avvia sia ROS2 che Tkinter
         node.root.mainloop()
+    except KeyboardInterrupt:
+        pass
     finally:
         node.destroy_node()
         rclpy.shutdown()

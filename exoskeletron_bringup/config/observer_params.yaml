@@ -7,26 +7,24 @@ observer_node:
     # ── Plant model ─────────────────────────────────────────
     # Devono corrispondere a dynamics_params.yaml
     fric_visc: 2.0          # [Nm·s/rad]
-    fric_coul: 2.0          # [Nm]       ← ora usato nel modello Observer 1
-    fric_eps: 0.005         # [rad/s]    ← soglia tanh per Coulomb
+    fric_coul: 2.0          # [Nm]
+    fric_eps: 0.005         # [rad/s]
     damping_theta: 1.0      # [Nm·s/rad]
 
-    # ── Observer 1 — Luenberger ─────────────────────────────
+    # ── Observer 1 — Luenberger (canale 3: encoder) ─────────
     obs1_pole_1: -15.0
     obs1_pole_2: -20.0
 
-    # ── Observer 2 — Inversione Ammittanza ──────────────────
-    # ATTENZIONE: questi parametri DEVONO essere sincronizzati
-    # con quelli dell'admittance_controller. In caso di modifica
-    # dei parametri del controller, aggiornare anche qui.
-    adm_M_virt: 0.5
-    adm_D_virt: 5.0
-    adm_K_virt: 2.0
-    adm_theta_eq: 0.0
-    adm_force_deadband: 0.0   # deve corrispondere a force_deadband del controller
-    adm_theta_ref_min: -2.0   # deve corrispondere a theta_ref_min del controller
-    adm_theta_ref_max: 2.0    # deve corrispondere a theta_ref_max del controller
-    adm_theta_dot_max: 5.0    # deve corrispondere a theta_dot_max del controller
+    # ── Observer 2 — Force Balance (canale 0: sensore forza) ─
+    # alpha_acc: EMA sul dirty-derivative di θ̇ per stimare θ̈
+    #   0.02 = molto filtrato (poco rumore, ~250ms ritardo)
+    #   0.05 = meno filtrato (più rumore, ~100ms ritardo)
+    obs2_alpha_acc: 0.02
+
+    # alpha_tau: EMA su τ̂_ext stimato
+    #   0.05 = ben filtrato (detection ~200ms)
+    #   0.10 = più reattivo (detection ~100ms, più rumoroso)
+    obs2_alpha_tau: 0.05
 
     # ── Filtri residui ──────────────────────────────────────
     residual_filter_alpha: 0.05
