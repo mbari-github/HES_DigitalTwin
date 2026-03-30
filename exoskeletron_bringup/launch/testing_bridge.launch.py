@@ -35,7 +35,7 @@ def generate_launch_description():
 
     FAULT_CHANNEL   = 0
     FAULT_TYPE      = 'offset'
-    FAULT_MAGNITUDE = 1.0
+    FAULT_MAGNITUDE = -0.5
     FAULT_ACTIVE    = False
     NOISE_STD       = 0.1
     SPIKE_DURATION  = 0.05
