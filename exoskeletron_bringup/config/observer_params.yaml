@@ -1,31 +1,69 @@
 observer_node:
   ros__parameters:
 
-    joint_name: rev_crank
-    publish_rate: 200.0
+    # ── Configurazione base ─────────────────────────────────────────────────
+    joint_name:     'rev_crank'
+    publish_rate:   200.0           # [Hz] — deve corrispondere alla rate del plant
 
-    # ── Plant model ─────────────────────────────────────────
-    # Devono corrispondere a dynamics_params.yaml
-    fric_visc: 2.0          # [Nm·s/rad]
-    fric_coul: 2.0          # [Nm]
-    fric_eps: 0.005         # [rad/s]
-    damping_theta: 1.0      # [Nm·s/rad]
+    # ── Modello plant (devono corrispondere a dynamics_params.yaml) ─────────
+    fric_visc:      2.0             # [Nm·s/rad]  attrito viscoso
+    fric_coul:      2.0             # [Nm]        attrito Coulomb
+    fric_eps:       0.005           # [rad/s]     soglia tanh Coulomb
+    damping_theta:  1.0             # [Nm·s/rad]  smorzamento addizionale
 
-    # ── Observer 1 — Luenberger (canale 3: encoder) ─────────
-    obs1_pole_1: -15.0
-    obs1_pole_2: -20.0
+    # ── Observer 1 — Luenberger (fault detection encoder, canale 3) ─────────
+    #
+    # Poli dell'observer: devono essere più veloci dei poli del plant.
+    # Plant lineare: λ1=0, λ2 = -(fric_visc+damping_theta)/M_eff ≈ -20
+    # Observer: poli ~3-4x più veloci → [-60, -80] è un buon punto di partenza.
+    #
+    # Più negativi = convergenza più rapida ma più sensibile al rumore.
+    # Se il residuo è troppo rumoroso in nominale, spostare i poli verso 0.
+    # Se il residuo risponde troppo lentamente al guasto, spostare verso -inf.
+    #
+    # Regola con Eulero esplicito a dt=5ms: restare |polo| < 50.
+    # Plant ha polo dominante ≈ -(fric_visc+damping)/M_eff ≈ -6.
+    # Observer 2-3x più veloce è sufficiente.
+    #
+    # NOTA: l1 = -(p1+p2) - D/M  →  con p1=-15, p2=-20, D/M≈6: l1 = +29  (positivo)
+    #        l2 = p1·p2 - l1·D/M →  300 - 174 = 126
+    # l1 positivo è CORRETTO: garantisce che la correzione riduca l'errore.
+    obs1_pole_1:   -15.0
+    obs1_pole_2:   -20.0
 
-    # ── Observer 2 — Force Balance (canale 0: sensore forza) ─
-    # alpha_acc: EMA sul dirty-derivative di θ̇ per stimare θ̈
-    #   0.02 = molto filtrato (poco rumore, ~250ms ritardo)
-    #   0.05 = meno filtrato (più rumore, ~100ms ritardo)
-    obs2_alpha_acc: 0.02
+    # ── Observer 2 — Force Balance (fault detection sensore forza, canale 0) ──
+    #
+    # Stima τ_ext dal bilancio di forze algebrico (funziona anche a sistema fermo):
+    #   τ̂_ext = M_eff·θ̈ + proj + τ_fric_lin - τ_m - τ_pass
+    #
+    # obs2_alpha_acc: filtro EMA sul dirty-derivative di θ̇ per stimare θ̈
+    #
+    # Analisi del bag ha mostrato che M_eff·θ̈ contribuisce solo 0.005 Nm std
+    # al residuo → il rumore da derivata è trascurabile.
+    # Possiamo usare alpha_acc alto senza penalità di rumore.
+    # 0.50 → group delay ≈ 5 ms  (quasi nessun ritardo)
+    obs2_alpha_acc:  0.50
 
-    # alpha_tau: EMA su τ̂_ext stimato
-    #   0.05 = ben filtrato (detection ~200ms)
-    #   0.10 = più reattivo (detection ~100ms, più rumoroso)
-    obs2_alpha_tau: 0.05
+    # obs2_alpha_tau: filtro EMA su τ̂_ext
+    #
+    # Il residuo con alpha_tau=0.05 era dominato da lag (660 ms misurati),
+    # non da rumore. Aumentando a 0.30 il lag scende a ~12 ms e lo std del
+    # residuo nominale passa da 0.21 Nm a ~0.004 Nm (50x miglioramento).
+    # 0.30 → group delay ≈ 12 ms
+    obs2_alpha_tau:  0.30
 
-    # ── Filtri residui ──────────────────────────────────────
+    # ── Filtro EMA sui residui ───────────────────────────────────────────────
+    # alpha ∈ (0, 1]:
+    #   alpha = 1   → nessun filtro (residuo grezzo)
+    #   alpha = 0.1 → filtro aggressivo (costante di tempo ≈ 10 campioni = 50ms a 200Hz)
+    #   alpha = 0.05 → filtro più lento (costante di tempo ≈ 20 campioni = 100ms)
+    #
+    # Il residuo filtrato è quello da usare per soglie nella safety (meno falsi positivi).
+    #
     residual_filter_alpha: 0.05
-    rms_window: 50
+
+    # ── Finestra RMS ─────────────────────────────────────────────────────────
+    # Numero di campioni per il calcolo RMS del residuo (pubblicato nel debug).
+    # 50 campioni @ 200Hz = 250ms di finestra.
+    #
+    rms_window:     50

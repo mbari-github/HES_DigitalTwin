@@ -1,136 +1,99 @@
 #!/usr/bin/env python3
 """
 observer_node.py
-================
-Nodo ROS2 con due osservatori model-based per la fault detection sul digital
-twin dell'esoscheletro.
+=================
+Nodo ROS2 per la fault detection model-based sull'esoscheletro.
 
-Motivazione
------------
-Il FaultMonitorMode della state machine esegue soglie semplici su tau e velocità.
-Questi osservatori aggiungono un secondo livello di rilevamento basato sul
-**residuo** tra il valore misurato e quello stimato dal modello: un residuo
-persistentemente non nullo indica un guasto, anche prima che venga superata
-una soglia assoluta.
+Implementa quattro strati di detection complementari:
 
-Equazione del plant (scalare ridotta, DOF: rev_crank = theta):
+  OBSERVER 1 — Luenberger sullo stato (θ, θ̇)
+  ─────────────────────────────────────────────
+  Modello del plant ridotto a 1-DOF. Predice θ̂ e θ̇_hat usando il modello
+  completo e corregge con guadagni di Luenberger. Il residuo (innovazione)
+  è sensibile a guasti encoder e attuatore, ma ha detection latency di
+  ~1-1.5 s per fault su τ_ext (canale 0) perché la risposta è mediata
+  dalla catena ammittanza → tracking.
 
-    M_eff * θ̈ = τ_m + τ_pass - proj - τ_fric - τ_damp + τ_ext
+  OBSERVER 2 — Inversione dell'ammittanza
+  ─────────────────────────────────────────
+  Ricostruisce τ̂_ext dai riferimenti di traiettoria invertendo il modello
+  dell'admittance controller. Sensibile a fault nel loop di ammittanza.
+  Invalidato quando il riferimento è saturato.
 
-dove:
-    τ_fric = fric_visc * θ̇ + fric_coul * tanh(θ̇ / fric_eps)  [non lineare]
-    τ_damp = damping_theta * θ̇                                  [lineare]
-    M_eff, proj, τ_pass  → pubblicati da /exo_dynamics/ff_terms
-    τ_m                  → coppia comandata dal trajectory controller
-    τ_ext                → forza utente proiettata su theta
+  OBSERVER 3 — Momento generalizzato 
+  ─────────────────────────────────────────────
+  Stima diretta della discrepanza sulla coppia esterna, senza bisogno di
+  calcolare θ̈ (derivata rumorosa). Lavora sull'integrale del momento:
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OBSERVER 1 — State Observer di Luenberger  (fault detection canale 3: encoder)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      p(t) = M_eff · θ̇
 
-Stima lo stato [θ̂, θ̇̂] usando il modello del plant e la coppia τ_m (sempre
-affidabile), senza fidarsi dell'encoder. Il residuo r = θ_meas - θ̂ è nullo
-in nominale e cresce in presenza di guasti sull'encoder (canale 3).
+      σ̇ = τ_known + r_mom          σ(0) = p(0)
+      r_mom = K_mom · (p - σ)
 
-Il modello NON include τ_ext nel calcolo di θ̈: questo è intenzionale.
-L'observer 1 è progettato per rilevare fault sull'encoder, non sulla forza.
-Se includessimo τ_ext (potenzialmente faulted su canale 0), avveleneremmo
-la predizione. Senza τ_ext, il Luenberger ha un residuo nominale non-zero
-durante il moto guidato dall'utente, ma i guadagni di correzione (l1, l2)
-lo mantengono limitato. Un fault sull'encoder produce un salto netto che
-supera questo baseline.
+  dove τ_known = τ_m + τ_pass + τ_ext_meas - proj - friction.
+  In regime stazionario: r_mom → (τ_ext_reale - τ_ext_misurato).
 
-Modello lineare approssimato  x = [θ, θ̇],  y = θ:
+  Con K_mom = 50 la costante di tempo è ~20 ms: detection latency
+  ~40-60 ms per un offset di 2 Nm (vs ~1.5 s del Luenberger).
 
-    A = [[0,         1       ],      C = [1, 0]
-         [0,  -D/M_eff       ]]
+  GUARDIA 4 — Derivata di τ_ext  ★ NUOVO
+  ─────────────────────────────────────────
+  Monitora |Δτ_ext / Δt|. Una forza umana fisica non può produrre
+  gradini istantanei (inerzia braccio, compliance tessuti, banda
+  muscolare ≈ 5-10 Hz). Un salto di 2 Nm in 5 ms = 400 Nm/s è
+  necessariamente artificiale. Detection: 1 campione (~5 ms).
+  Cieco ai drift lenti.
 
-Gain via pole placement (poli p1, p2 reali negativi):
-
-    l1 = -(p1+p2) - D/M_eff
-    l2 =  p1·p2 - l1·(D/M_eff)
-
-Aggiornamento Eulero esplicito: usa θ̇̂[k] (vecchio) per calcolare θ̂[k+1].
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OBSERVER 2 — Force Balance  (fault detection canale 0: sensore forza)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Stima τ_ext dal bilancio algebrico di forze — funziona anche a sistema FERMO
-(a differenza del momentum observer che richiede θ̇ ≠ 0).
-
-Dal bilancio:
-    τ_ext = M_eff·θ̈ + proj + τ_fric_lin - τ_m - τ_pass
-
-dove τ_fric_lin = (fric_visc + damping_theta)·θ̇  (solo parte lineare — il
-termine di Coulomb viene omesso deliberatamente: a θ̇≈0 il suo segno è ambiguo
-e aggiungerebbe ±fric_coul Nm di bias al residuo nominale).
-
-θ̈ stimato con dirty-derivative filtrato (EMA su (θ̇[k]-θ̇[k-1])/dt):
-    θ̈ˆ[k] = α_acc·(θ̇[k]-θ̇[k-1])/dt + (1-α_acc)·θ̈ˆ[k-1]
-
-τ̂_ext ulteriormente filtrato con EMA:
-    τ̂_ext[k] = α_tau·τ_ext_inst[k] + (1-α_tau)·τ̂_ext[k-1]
-
-Residuo:  r_torque = τ_ext_meas - τ̂_ext
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Topics
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Sottoscrizioni:
-  /joint_states                   sensor_msgs/JointState     [può essere faulted canale 3]
-  /exo_dynamics/tau_ext_theta     std_msgs/Float64           [può essere faulted canale 0]
-  /exo_dynamics/ff_terms          std_msgs/Float64MultiArray [sempre pulito]
-  /torque_raw                     std_msgs/Float64           [coppia pulita, remap da launch]
-  /exo_bridge/status              std_msgs/Float64MultiArray [θ̇ sempre affidabile]
-
-Pubblicazioni:
-  /observer/state_residual    std_msgs/Float64            r_state  = θ_meas - θ̂
-  /observer/torque_residual   std_msgs/Float64            r_torque = τ_ext_meas - τ̂_ext
-  /observer/debug             std_msgs/Float64MultiArray  diagnostica completa (15 campi)
-
-Layout /observer/debug:
-  [0]  theta_hat             stima posizione  (observer 1)
-  [1]  theta_dot_hat         stima velocità   (observer 1)
-  [2]  state_residual        r_state grezzo
-  [3]  tau_ext_hat           stima forza esterna (observer 2)
-  [4]  torque_residual       r_torque grezzo
-  [5]  state_res_filtered    r_state filtrato EMA
-  [6]  torque_res_filtered   r_torque filtrato EMA
-  [7]  theta_meas            θ da joint_states (possibilmente faulted)
-  [8]  theta_dot_meas        θ̇ da joint_states (possibilmente faulted)
-  [9]  tau_m                 coppia comandata (da /torque_raw)
-  [10] tau_ext_meas          τ_ext da sensore (possibilmente faulted)
-  [11] M_eff                 inerzia effettiva corrente
-  [12] proj                  B^T·(M·Ḃ·θ̇ + h)
-  [13] theta_ddot_hat        θ̈ stimata (dirty derivative filtrato)
-  [14] tau_pass              coppie passive proiettate
+------
+  Sub:  /joint_states                    sensor_msgs/JointState
+        /exo_dynamics/tau_ext_theta      std_msgs/Float64
+        /exo_dynamics/ff_terms           std_msgs/Float64MultiArray
+        /torque_raw                      std_msgs/Float64
+        /trajectory_ref                  std_msgs/Float64MultiArray
+  Pub:  /observer/state_residual         std_msgs/Float64
+        /observer/torque_residual        std_msgs/Float64
+        /observer/momentum_residual      std_msgs/Float64     
+        /observer/tau_ext_rate_alarm     std_msgs/Float64     
+        /observer/state_rms              std_msgs/Float64
+        /observer/torque_rms             std_msgs/Float64
+        /observer/debug                  std_msgs/Float64MultiArray  (21 campi)
 
 Parametri ROS2
-━━━━━━━━━━━━━━
-  joint_name              (str,   default 'rev_crank')
-  publish_rate            (float, default 200.0)  [Hz]
+--------------
+  joint_name             (str)    joint da osservare
+  publish_rate           (float)  frequenza del loop [Hz]
 
-  # Modello plant (devono corrispondere a dynamics_params.yaml)
-  fric_visc               (float, default 2.0)    [Nm·s/rad]
-  fric_coul               (float, default 2.0)    [Nm]
-  fric_eps                (float, default 0.005)  [rad/s]
-  damping_theta           (float, default 1.0)    [Nm·s/rad]
+  # Plant model
+  fric_visc              (float)  attrito viscoso [Nm·s/rad]
+  fric_coul              (float)  attrito Coulomb [Nm]
+  fric_eps               (float)  soglia tanh Coulomb [rad/s]
+  damping_theta          (float)  smorzamento addizionale [Nm·s/rad]
 
   # Observer 1 — Luenberger
-  obs1_pole_1             (float, default -15.0)  polo 1 (reale negativo)
-  obs1_pole_2             (float, default -20.0)  polo 2 (reale negativo)
+  obs1_pole_1            (float)  polo 1 (negativo, stabile)
+  obs1_pole_2            (float)  polo 2 (negativo, stabile)
 
-  # Observer 2 — Force Balance
-  obs2_alpha_acc          (float, default 0.02)   EMA sul dirty-derivative θ̈
-  obs2_alpha_tau          (float, default 0.05)   EMA su τ̂_ext
+  # Observer 2 — Inversione ammittanza
+  adm_M_virt             (float)  massa virtuale ammittanza
+  adm_D_virt             (float)  smorzamento virtuale ammittanza
+  adm_K_virt             (float)  rigidezza virtuale ammittanza
+  adm_theta_eq           (float)  posizione di equilibrio
+  adm_force_deadband     (float)  deadband forza dell'ammittanza
+  adm_theta_ref_min      (float)  limite inferiore θ_ref
+  adm_theta_ref_max      (float)  limite superiore θ_ref
+  adm_theta_dot_max      (float)  limite velocità θ̇_ref
 
-  # Filtro EMA sui residui pubblicati
-  residual_filter_alpha   (float, default 0.05)   coefficiente EMA
+  # Observer 3 — Momento generalizzato
+  mom_obs_gain           (float)  guadagno K_mom [1/s] (default 50 → τ ≈ 20 ms)
 
-  # Finestra buffer RMS (campioni)
-  rms_window              (int,   default 50)
+  # Guardia 4 — Derivata τ_ext
+  tau_ext_max_rate       (float)  soglia |dτ_ext/dt| [Nm/s] (default 100)
+
+  # Filtri residui
+  residual_filter_alpha  (float)  costante EMA
+  rms_window             (int)    finestra RMS [campioni]
+  torque_res_max         (float)  clamp residuo coppia [Nm]
 """
 
 import math
@@ -143,385 +106,451 @@ from std_msgs.msg import Float64, Float64MultiArray
 from sensor_msgs.msg import JointState
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Filtro EMA helper
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# Utility
+# ─────────────────────────────────────────────────────────────
 
 def ema(prev: float, new: float, alpha: float) -> float:
-    """Exponential Moving Average. alpha vicino a 1 → poco filtraggio."""
+    """Exponential moving average."""
     return alpha * new + (1.0 - alpha) * prev
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Nodo principale
-# ─────────────────────────────────────────────────────────────────────────────
+def rms_from_buf(buf) -> float:
+    """RMS da un buffer di valori al quadrato."""
+    if len(buf) == 0:
+        return 0.0
+    return math.sqrt(sum(buf) / len(buf))
+
 
 class ObserverNode(Node):
 
     def __init__(self):
         super().__init__('observer_node')
 
-        # ── Parametri ───────────────────────────────────────────────────────
-        self.declare_parameter('joint_name',            'rev_crank')
-        self.declare_parameter('publish_rate',          200.0)
+        # ── Parametri ─────────────────────────────────────────────
+        self.declare_parameter('joint_name', 'rev_crank')
+        self.declare_parameter('publish_rate', 200.0)
 
-        # Modello plant
-        self.declare_parameter('fric_visc',             2.0)
-        self.declare_parameter('fric_coul',             2.0)
-        self.declare_parameter('fric_eps',              0.005)
-        self.declare_parameter('damping_theta',         1.0)
+        # Plant model (devono corrispondere a dynamics_params.yaml)
+        self.declare_parameter('fric_visc', 2.0)
+        self.declare_parameter('fric_coul', 2.0)
+        self.declare_parameter('fric_eps', 0.005)
+        self.declare_parameter('damping_theta', 1.0)
 
-        # Observer 1 — Luenberger
-        self.declare_parameter('obs1_pole_1',          -15.0)
-        self.declare_parameter('obs1_pole_2',          -20.0)
+        # Observer 1 — Luenberger poles
+        self.declare_parameter('obs1_pole_1', -15.0)
+        self.declare_parameter('obs1_pole_2', -20.0)
 
-        # Observer 2 — Force Balance
-        self.declare_parameter('obs2_alpha_acc',        0.02)
-        self.declare_parameter('obs2_alpha_tau',        0.05)
+        # Observer 2 — Admittance inversion
+        self.declare_parameter('adm_M_virt', 0.5)
+        self.declare_parameter('adm_D_virt', 5.0)
+        self.declare_parameter('adm_K_virt', 2.0)
+        self.declare_parameter('adm_theta_eq', 0.0)
+        self.declare_parameter('adm_force_deadband', 0.0)
+        self.declare_parameter('adm_theta_ref_min', -2.0)
+        self.declare_parameter('adm_theta_ref_max', 2.0)
+        self.declare_parameter('adm_theta_dot_max', 5.0)
 
-        # Filtro residui
+        # Observer 3 — Momentum observer
+        # K_mom [1/s]: guadagno del momentum observer.
+        # Costante di tempo τ ≈ 1/K_mom.
+        #   K_mom = 50  → τ ≈ 20 ms  (detection rapida)
+        #   K_mom = 20  → τ ≈ 50 ms  (più filtrato)
+        #   K_mom = 100 → τ ≈ 10 ms  (molto rapido, più sensibile al rumore)
+        self.declare_parameter('mom_obs_gain', 50.0)
+
+        # Guardia 4 — Rate-of-change τ_ext
+        # Soglia in Nm/s. Riferimenti fisiologici:
+        #   - Rate massimo forza umana: ~5-20 Nm/s
+        #   - Fault offset 2 Nm in 5 ms → 400 Nm/s
+        # 100 Nm/s offre ampio margine per l'uso normale.
+        self.declare_parameter('tau_ext_max_rate', 100.0)
+
+        # Filtri residui
         self.declare_parameter('residual_filter_alpha', 0.05)
-        self.declare_parameter('rms_window',            50)
+        self.declare_parameter('rms_window', 50)
+        self.declare_parameter('torque_res_max', 0.5)
 
-        # ── Lettura parametri fissi ──────────────────────────────────────────
-        self._joint_name    = str(self.get_parameter('joint_name').value)
-        publish_rate        = float(self.get_parameter('publish_rate').value)
-        self._dt            = 1.0 / publish_rate
+        self._joint_name = self.get_parameter('joint_name').value
+        rate = self.get_parameter('publish_rate').value
+        self._dt = 1.0 / rate
 
-        # ── Stato interno — segnali in ingresso ─────────────────────────────
-        self._theta_meas        = 0.0
-        self._theta_dot_meas    = 0.0
-        self._tau_ext_meas      = 0.0
+        # ── Input ─────────────────────────────────────────────
+        self._theta_meas = 0.0
+        self._theta_dot_meas = 0.0
+        self._tau_ext_meas = 0.0
 
-        self._tau_m             = 0.0
-        self._M_eff             = 1.0
-        self._proj              = 0.0
-        self._g_proj            = 0.0
-        self._tau_pass          = 0.0
+        self._tau_m = 0.0
+        self._M_eff = 1.0
+        self._proj = 0.0
+        self._tau_pass = 0.0
 
-        self._theta_bridge      = 0.0
-        self._theta_dot_bridge  = 0.0
-        self._bridge_received   = False
+        # Trajectory ref
+        self._theta_ref = 0.0
+        self._theta_dot_ref = 0.0
+        self._theta_ddot_ref = 0.0
 
-        self._js_received       = False
-        self._ff_received       = False
-        self._tau_ext_received  = False
-        self._tau_m_received    = False
+        # Flags di ricezione
+        self._js_received = False
+        self._ff_received = False
+        self._tau_ext_received = False
+        self._tau_m_received = False
+        self._traj_received = False
 
-        # ── Stato Observer 1 — Luenberger ───────────────────────────────────
-        self._theta_hat         = 0.0
-        self._theta_dot_hat     = 0.0
-        self._obs1_initialized  = False
+        # ── Observer 1 (Luenberger) ───────────────────────────
+        self._theta_hat = 0.0
+        self._theta_dot_hat = 0.0
+        self._obs1_initialized = False
 
-        # ── Stato Observer 2 — Force Balance ────────────────────────────────
-        self._tau_ext_hat       = 0.0
-        self._theta_dot_prev    = 0.0
-        self._theta_ddot_hat    = 0.0
-        self._obs2_initialized  = False
+        # ── Observer 2 (Admittance Inversion) ─────────────────
+        self._tau_ext_hat = 0.0
+        self._obs2_valid = False
 
-        # ── Residui filtrati ─────────────────────────────────────────────────
-        self._state_res_filtered   = 0.0
-        self._torque_res_filtered  = 0.0
+        # ── Observer 3 (Momentum) ─────────────────────────────
+        self._mom_sigma = 0.0       # integratore σ(t)
+        self._r_momentum = 0.0      # residuo r(t)
+        self._M_eff_prev = 1.0      # M_eff al passo precedente
+        self._mom_initialized = False
+
+        # ── Guardia 4 (Derivata τ_ext) ────────────────────────
+        self._tau_ext_prev = 0.0
+        self._tau_ext_rate = 0.0
+        self._rate_alarm = False
+        self._rate_guard_initialized = False
+
+        # ── Residui ───────────────────────────────────────────
+        self._state_res_filtered = 0.0
+        self._torque_res_filtered = 0.0
 
         win = int(self.get_parameter('rms_window').value)
-        self._state_res_buf   = deque(maxlen=win)
-        self._torque_res_buf  = deque(maxlen=win)
+        self._state_res_buf = deque(maxlen=win)
+        self._torque_res_buf = deque(maxlen=win)
 
-        # ── Subscribers ─────────────────────────────────────────────────────
-        self.create_subscription(
-            JointState, '/joint_states', self._js_cb, 10)
-        self.create_subscription(
-            Float64, '/exo_dynamics/tau_ext_theta', self._tau_ext_cb, 10)
-        self.create_subscription(
-            Float64MultiArray, '/exo_dynamics/ff_terms', self._ff_terms_cb, 10)
-        self.create_subscription(
-            Float64, '/torque_raw', self._torque_cb, 10)
-        self.create_subscription(
-            Float64MultiArray, '/exo_bridge/status', self._bridge_status_cb, 10)
+        # ── Subscribers ───────────────────────────────────────
+        self.create_subscription(JointState, '/joint_states', self._js_cb, 10)
+        self.create_subscription(Float64, '/exo_dynamics/tau_ext_theta', self._tau_ext_cb, 10)
+        self.create_subscription(Float64MultiArray, '/exo_dynamics/ff_terms', self._ff_cb, 10)
+        self.create_subscription(Float64, '/torque_raw', self._tau_m_cb, 10)
+        self.create_subscription(Float64MultiArray, '/trajectory_ref', self._traj_cb, 10)
 
-        # ── Publishers ───────────────────────────────────────────────────────
-        self._pub_state_res  = self.create_publisher(
-            Float64, '/observer/state_residual', 10)
-        self._pub_torque_res = self.create_publisher(
-            Float64, '/observer/torque_residual', 10)
-        self._pub_debug      = self.create_publisher(
-            Float64MultiArray, '/observer/debug', 10)
+        # ── Publishers ────────────────────────────────────────
+        self._pub_state = self.create_publisher(Float64, '/observer/state_residual', 10)
+        self._pub_torque = self.create_publisher(Float64, '/observer/torque_residual', 10)
+        self._pub_momentum = self.create_publisher(Float64, '/observer/momentum_residual', 10)
+        self._pub_rate_alarm = self.create_publisher(Float64, '/observer/tau_ext_rate_alarm', 10)
+        self._pub_state_rms = self.create_publisher(Float64, '/observer/state_rms', 10)
+        self._pub_torque_rms = self.create_publisher(Float64, '/observer/torque_rms', 10)
+        self._pub_debug = self.create_publisher(Float64MultiArray, '/observer/debug', 10)
 
-        # ── Timer principale ─────────────────────────────────────────────────
         self.create_timer(self._dt, self._update)
 
         self.get_logger().info(
-            f'ObserverNode avviato | joint={self._joint_name} '
-            f'rate={publish_rate:.0f}Hz dt={self._dt*1e3:.2f}ms'
+            f"ObserverNode avviato | rate={rate:.0f} Hz | "
+            f"poli=[{self.get_parameter('obs1_pole_1').value}, "
+            f"{self.get_parameter('obs1_pole_2').value}] | "
+            f"K_mom={self.get_parameter('mom_obs_gain').value} | "
+            f"rate_max={self.get_parameter('tau_ext_max_rate').value} Nm/s"
         )
 
-    # =========================================================================
+    # ─────────────────────────────────────────────────────────
     # Callbacks
-    # =========================================================================
+    # ─────────────────────────────────────────────────────────
 
-    def _js_cb(self, msg: JointState) -> None:
+    def _js_cb(self, msg):
         try:
             idx = msg.name.index(self._joint_name)
         except ValueError:
             return
-        if idx < len(msg.position):
-            self._theta_meas = float(msg.position[idx])
-        if idx < len(msg.velocity):
-            self._theta_dot_meas = float(msg.velocity[idx])
+        self._theta_meas = msg.position[idx]
+        self._theta_dot_meas = msg.velocity[idx]
         self._js_received = True
 
-    def _tau_ext_cb(self, msg: Float64) -> None:
-        self._tau_ext_meas = float(msg.data)
+    def _tau_ext_cb(self, msg):
+        self._tau_ext_meas = msg.data
         self._tau_ext_received = True
 
-    def _ff_terms_cb(self, msg: Float64MultiArray) -> None:
-        d = msg.data
-        if len(d) > 0:
-            m = float(d[0])
-            self._M_eff = m if m > 1e-6 else 1.0
-        if len(d) > 1:
-            self._proj = float(d[1])
-        if len(d) > 2:
-            self._g_proj = float(d[2])
-        if len(d) > 3:
-            self._tau_pass = float(d[3])
-        self._ff_received = True
-
-    def _torque_cb(self, msg: Float64) -> None:
-        self._tau_m = float(msg.data)
+    def _tau_m_cb(self, msg):
+        self._tau_m = msg.data
         self._tau_m_received = True
 
-    def _bridge_status_cb(self, msg: Float64MultiArray) -> None:
-        if len(msg.data) < 4:
+    def _ff_cb(self, msg):
+        d = msg.data
+        if len(d) > 0:
+            self._M_eff = max(d[0], 1e-6)
+        if len(d) > 1:
+            self._proj = d[1]
+        if len(d) > 3:
+            self._tau_pass = d[3]
+        self._ff_received = True
+
+    def _traj_cb(self, msg):
+        d = msg.data
+        if len(d) < 3:
             return
-        self._theta_bridge      = float(msg.data[2])
-        self._theta_dot_bridge  = float(msg.data[3])
-        self._bridge_received   = True
+        self._theta_ref = d[0]
+        self._theta_dot_ref = d[1]
+        self._theta_ddot_ref = d[2]
+        self._traj_received = True
 
-    # =========================================================================
-    # Helpers numerici
-    # =========================================================================
-
-    @staticmethod
-    def _safe_sq(x: float, limit: float = 1e6) -> float:
-        x_clamped = max(-limit, min(limit, x))
-        return x_clamped * x_clamped
-
-    @staticmethod
-    def _is_valid(x: float) -> bool:
-        return math.isfinite(x)
-
-    def _reset_observer1(self, reason: str = '') -> None:
-        self._theta_hat         = self._theta_meas
-        self._theta_dot_hat     = self._theta_dot_meas
-        self._obs1_initialized  = False
-        if reason:
-            self.get_logger().warn(f'Observer 1 reset: {reason}')
-
-    def _reset_observer2(self, reason: str = '') -> None:
-        self._tau_ext_hat       = 0.0
-        self._theta_dot_prev    = self._theta_dot_meas
-        self._theta_ddot_hat    = 0.0
-        self._obs2_initialized  = False
-        if reason:
-            self.get_logger().warn(f'Observer 2 reset: {reason}')
-
-    # =========================================================================
+    # ─────────────────────────────────────────────────────────
     # Loop principale
-    # =========================================================================
+    # ─────────────────────────────────────────────────────────
 
-    def _update(self) -> None:
+    def _update(self):
 
-        if not (self._js_received and self._ff_received and self._tau_m_received):
+        if not (self._js_received and self._ff_received and
+                self._tau_m_received and self._traj_received and
+                self._tau_ext_received):
             return
 
         dt = self._dt
 
-        # ── Lettura parametri (aggiornabili a runtime) ───────────────────────
-        fric_visc     = float(self.get_parameter('fric_visc').value)
-        fric_coul     = float(self.get_parameter('fric_coul').value)
-        fric_eps      = float(self.get_parameter('fric_eps').value)
-        damping_theta = float(self.get_parameter('damping_theta').value)
-        alpha         = float(self.get_parameter('residual_filter_alpha').value)
+        # ── PARAMETRI PLANT ──────────────────────────────────
+        fric_visc = self.get_parameter('fric_visc').value
+        fric_coul = self.get_parameter('fric_coul').value
+        fric_eps = self.get_parameter('fric_eps').value
+        damping = self.get_parameter('damping_theta').value
+        alpha = self.get_parameter('residual_filter_alpha').value
 
-        M_eff    = self._M_eff
-        proj     = self._proj
-        tau_pass = self._tau_pass
-        tau_m    = self._tau_m
-
-        # Saturazione fisica (difesa contro NaN/Inf)
-        TAU_MAX   = 50.0
-        VEL_MAX   = 20.0
-        THETA_MAX = 5.0
-
-        tau_m    = max(-TAU_MAX,  min(TAU_MAX,  tau_m))
-        proj     = max(-TAU_MAX,  min(TAU_MAX,  proj))
-        tau_pass = max(-TAU_MAX,  min(TAU_MAX,  tau_pass))
-
-        # ── Attrito (modello del plant) ─────────────────────────────────────
-        def tau_friction(theta_dot: float) -> float:
-            return (fric_visc * theta_dot
-                    + fric_coul * math.tanh(theta_dot / max(fric_eps, 1e-9)))
-
-        def tau_damping(theta_dot: float) -> float:
-            return damping_theta * theta_dot
-
-        # ─────────────────────────────────────────────────────────────────────
+        # ─────────────────────────────────────────────────────
         # OBSERVER 1 — Luenberger
-        # ─────────────────────────────────────────────────────────────────────
-        #
-        # Modello SENZA τ_ext (intenzionale):
-        #   θ̈_model = (τ_m + τ_pass - proj - τ_fric - τ_damp) / M_eff
-        #
-        # Perché senza τ_ext: questo observer rileva fault sull'encoder
-        # (canale 3). τ_ext potrebbe essere corrotto (canale 0) e
-        # includerlo avvelenerebbe la predizione. Il residuo nominale
-        # non-zero durante il moto è gestito dai guadagni di Luenberger
-        # che lo mantengono limitato. Un fault sull'encoder produce un
-        # salto netto molto più grande di questo baseline.
+        # ─────────────────────────────────────────────────────
 
-        p1 = float(self.get_parameter('obs1_pole_1').value)
-        p2 = float(self.get_parameter('obs1_pole_2').value)
+        p1 = self.get_parameter('obs1_pole_1').value
+        p2 = self.get_parameter('obs1_pole_2').value
 
-        D_lin    = fric_visc + damping_theta
-        D_over_M = D_lin / M_eff
+        D_lin = fric_visc + damping
+        D_over_M = D_lin / self._M_eff
+
         l1 = -(p1 + p2) - D_over_M
         l2 = p1 * p2 - l1 * D_over_M
 
         if not self._obs1_initialized:
-            self._theta_hat     = self._theta_meas
+            self._theta_hat = self._theta_meas
             self._theta_dot_hat = self._theta_dot_meas
             self._obs1_initialized = True
-            self.get_logger().info(
-                f'Observer 1 inizializzato | theta={self._theta_hat:.4f} '
-                f'l1={l1:.2f} l2={l2:.2f} (poli: {p1}, {p2})'
-            )
 
-        tau_fric_hat = tau_friction(self._theta_dot_hat)
-        tau_damp_hat = tau_damping(self._theta_dot_hat)
+        # Attrito completo su θ̇_hat (per il modello del Luenberger)
+        tau_fric_visc = fric_visc * self._theta_dot_hat
+        tau_fric_coul = fric_coul * math.tanh(self._theta_dot_hat / fric_eps)
+        tau_damp = damping * self._theta_dot_hat
+        tau_dissipative = tau_fric_visc + tau_fric_coul + tau_damp
 
         theta_ddot_model = (
-            tau_m + tau_pass - proj - tau_fric_hat - tau_damp_hat
-        ) / M_eff
+            self._tau_m
+            + self._tau_pass
+            + self._tau_ext_meas
+            - self._proj
+            - tau_dissipative
+        ) / self._M_eff
 
-        # Innovazione PRIMA dell'aggiornamento
         innov = self._theta_meas - self._theta_hat
-        state_residual = innov
+        state_res = innov
 
-        # Eulero esplicito: entrambi calcolati sullo stato VECCHIO
-        new_theta_dot = self._theta_dot_hat + dt * (theta_ddot_model + l2 * innov)
-        new_theta     = self._theta_hat     + dt * (self._theta_dot_hat + l1 * innov)
-
-        # Clamp fisico
-        self._theta_dot_hat = max(-VEL_MAX,   min(VEL_MAX,   new_theta_dot))
-        self._theta_hat     = max(-THETA_MAX, min(THETA_MAX, new_theta))
-
-        # Guard NaN/Inf
-        if not (self._is_valid(self._theta_hat) and
-                self._is_valid(self._theta_dot_hat)):
-            self._reset_observer1('stato non finito rilevato')
-            state_residual = 0.0
-
-        # ─────────────────────────────────────────────────────────────────────
-        # OBSERVER 2 — Force Balance
-        # ─────────────────────────────────────────────────────────────────────
-        #
-        # τ_ext = M_eff·θ̈ + proj + τ_fric_lin - τ_m - τ_pass
-        #
-        # Solo parte lineare dell'attrito (viscoso + damping).
-        # Il Coulomb è omesso: a θ̇≈0 il segno è ambiguo e aggiungerebbe
-        # ±fric_coul Nm di bias al residuo nominale.
-
-        if self._bridge_received:
-            theta_dot_fb = self._theta_dot_bridge
-        else:
-            theta_dot_fb = self._theta_dot_meas
-        theta_dot_fb = max(-VEL_MAX, min(VEL_MAX, theta_dot_fb))
-
-        if not self._obs2_initialized:
-            self._theta_dot_prev  = theta_dot_fb
-            self._theta_ddot_hat  = 0.0
-            self._tau_ext_hat     = 0.0
-            self._obs2_initialized = True
-            self.get_logger().info('Observer 2 (Force Balance) inizializzato.')
-
-        # Dirty derivative filtrato per stimare θ̈
-        alpha_acc = float(self.get_parameter('obs2_alpha_acc').value)
-        raw_ddot  = (theta_dot_fb - self._theta_dot_prev) / dt
-        self._theta_ddot_hat = (alpha_acc * raw_ddot
-                                + (1.0 - alpha_acc) * self._theta_ddot_hat)
-        self._theta_dot_prev = theta_dot_fb
-
-        tau_fric_lin = (fric_visc + damping_theta) * theta_dot_fb
-
-        tau_ext_inst = (
-            M_eff * self._theta_ddot_hat
-            + proj
-            + tau_fric_lin
-            - tau_m
-            - tau_pass
+        # Eulero esplicito corretto
+        theta_dot_hat_new = (
+            self._theta_dot_hat + dt * (theta_ddot_model + l2 * innov)
         )
-        tau_ext_inst = max(-TAU_MAX, min(TAU_MAX, tau_ext_inst))
+        theta_hat_new = (
+            self._theta_hat + dt * (self._theta_dot_hat + l1 * innov)
+        )
+        self._theta_dot_hat = theta_dot_hat_new
+        self._theta_hat = theta_hat_new
 
-        alpha_tau = float(self.get_parameter('obs2_alpha_tau').value)
-        self._tau_ext_hat = (alpha_tau * tau_ext_inst
-                             + (1.0 - alpha_tau) * self._tau_ext_hat)
+        # ─────────────────────────────────────────────────────
+        # OBSERVER 2 — Inversione Ammittanza
+        # ─────────────────────────────────────────────────────
 
-        torque_residual = self._tau_ext_meas - self._tau_ext_hat
+        Mv = self.get_parameter('adm_M_virt').value
+        Dv = self.get_parameter('adm_D_virt').value
+        Kv = self.get_parameter('adm_K_virt').value
+        theta_eq = self.get_parameter('adm_theta_eq').value
+        deadband = self.get_parameter('adm_force_deadband').value
+        th_min = self.get_parameter('adm_theta_ref_min').value
+        th_max = self.get_parameter('adm_theta_ref_max').value
+        dv_max = self.get_parameter('adm_theta_dot_max').value
 
-        # ─────────────────────────────────────────────────────────────────────
-        # Filtraggio EMA dei residui
-        # ─────────────────────────────────────────────────────────────────────
-        RES_MAX = 100.0
-        state_residual  = max(-RES_MAX, min(RES_MAX, state_residual))
-        torque_residual = max(-RES_MAX, min(RES_MAX, torque_residual))
+        sat_margin = 1e-3
+        ref_pos_saturated = (
+            self._theta_ref <= th_min + sat_margin or
+            self._theta_ref >= th_max - sat_margin
+        )
+        ref_vel_saturated = (
+            abs(self._theta_dot_ref) >= dv_max - sat_margin
+        )
+        in_deadband = abs(self._tau_ext_meas) < deadband
 
-        self._state_res_filtered  = ema(
-            self._state_res_filtered,  state_residual,  alpha)
-        self._torque_res_filtered = ema(
-            self._torque_res_filtered, torque_residual, alpha)
+        self._obs2_valid = not (ref_pos_saturated or ref_vel_saturated or in_deadband)
 
-        self._state_res_buf.append(self._safe_sq(state_residual))
-        self._torque_res_buf.append(self._safe_sq(torque_residual))
+        if self._obs2_valid:
+            self._tau_ext_hat = (
+                Mv * self._theta_ddot_ref +
+                Dv * self._theta_dot_ref +
+                Kv * (self._theta_ref - theta_eq)
+            )
+            torque_res = self._tau_ext_meas - self._tau_ext_hat
+        else:
+            self._tau_ext_hat = float('nan')
+            torque_res = 0.0
 
-        # ─────────────────────────────────────────────────────────────────────
-        # Pubblicazione
-        # ─────────────────────────────────────────────────────────────────────
-        msg_sr = Float64()
-        msg_sr.data = float(state_residual)
-        self._pub_state_res.publish(msg_sr)
+        res_max = self.get_parameter('torque_res_max').value
+        torque_res = max(-res_max, min(res_max, torque_res))
 
-        msg_tr = Float64()
-        msg_tr.data = float(torque_residual)
-        self._pub_torque_res.publish(msg_tr)
+        # ─────────────────────────────────────────────────────
+        # OBSERVER 3 — Momento Generalizzato
+        # ─────────────────────────────────────────────────────
+        #
+        # Principio: p = M_eff · θ̇  (momento generalizzato)
+        #
+        #   dp/dt = Ṁ_eff·θ̇ + τ_m + τ_pass + τ_ext_real − proj − friction
+        #
+        # L'observer integra i termini noti e confronta con p:
+        #
+        #   σ̇ = τ_known + r_mom         σ(0) = p(0)
+        #   r_mom = K_mom · (p − σ)
+        #
+        # In regime:  r_mom → τ_ext_real − τ_ext_meas
+        #
+        # Il termine Ṁ_eff·θ̇ (variazione inerzia con la configurazione)
+        # viene compensato numericamente:
+        #   Δp_M ≈ (M_eff_k − M_eff_{k-1}) · θ̇
 
+        K_mom = self.get_parameter('mom_obs_gain').value
+
+        p_now = self._M_eff * self._theta_dot_meas
+
+        if not self._mom_initialized:
+            self._mom_sigma = p_now
+            self._M_eff_prev = self._M_eff
+            self._mom_initialized = True
+
+        # Attrito calcolato su θ̇ MISURATO (coerente con p = M·θ̇_meas)
+        tau_fric_visc_m = fric_visc * self._theta_dot_meas
+        tau_fric_coul_m = fric_coul * math.tanh(self._theta_dot_meas / fric_eps)
+        tau_damp_m = damping * self._theta_dot_meas
+        tau_dissipative_m = tau_fric_visc_m + tau_fric_coul_m + tau_damp_m
+
+        # Termini noti di dp/dt
+        tau_known = (
+            self._tau_m
+            + self._tau_pass
+            + self._tau_ext_meas
+            - self._proj
+            - tau_dissipative_m
+        )
+
+        # Compensazione variazione inerzia: ∫ Ṁ·θ̇ dt ≈ ΔM · θ̇
+        delta_p_M = (self._M_eff - self._M_eff_prev) * self._theta_dot_meas
+
+        # Aggiornamento integratore
+        self._mom_sigma += (tau_known + self._r_momentum) * dt + delta_p_M
+
+        # Residuo
+        self._r_momentum = K_mom * (p_now - self._mom_sigma)
+
+        self._M_eff_prev = self._M_eff
+
+        # ─────────────────────────────────────────────────────
+        # GUARDIA 4 — Derivata τ_ext
+        # ─────────────────────────────────────────────────────
+
+        max_rate = self.get_parameter('tau_ext_max_rate').value
+
+        if not self._rate_guard_initialized:
+            self._tau_ext_prev = self._tau_ext_meas
+            self._rate_guard_initialized = True
+
+        self._tau_ext_rate = abs(self._tau_ext_meas - self._tau_ext_prev) / dt
+        self._rate_alarm = self._tau_ext_rate > max_rate
+        self._tau_ext_prev = self._tau_ext_meas
+
+        # ── FILTRI ───────────────────────────────────────────
+        self._state_res_filtered = ema(self._state_res_filtered, state_res, alpha)
+        self._torque_res_filtered = ema(self._torque_res_filtered, torque_res, alpha)
+
+        self._state_res_buf.append(state_res ** 2)
+        self._torque_res_buf.append(torque_res ** 2)
+
+        state_rms = rms_from_buf(self._state_res_buf)
+        torque_rms = rms_from_buf(self._torque_res_buf)
+
+        # ── PUBBLICAZIONE ────────────────────────────────────
+
+        msg = Float64()
+        msg.data = state_res
+        self._pub_state.publish(msg)
+
+        msg = Float64()
+        msg.data = torque_res
+        self._pub_torque.publish(msg)
+
+        msg = Float64()
+        msg.data = self._r_momentum
+        self._pub_momentum.publish(msg)
+
+        msg = Float64()
+        msg.data = 1.0 if self._rate_alarm else 0.0
+        self._pub_rate_alarm.publish(msg)
+
+        msg = Float64()
+        msg.data = state_rms
+        self._pub_state_rms.publish(msg)
+
+        msg = Float64()
+        msg.data = torque_rms
+        self._pub_torque_rms.publish(msg)
+
+        # Debug: layout esteso (21 campi)
+        # [0]  theta_hat
+        # [1]  theta_dot_hat
+        # [2]  state_residual (innovazione)
+        # [3]  tau_ext_hat (0 se obs2 non valido)
+        # [4]  torque_residual (obs2, clampato)
+        # [5]  state_res_filtered (EMA)
+        # [6]  torque_res_filtered (EMA)
+        # [7]  state_rms
+        # [8]  torque_rms
+        # [9]  theta_meas
+        # [10] theta_dot_meas
+        # [11] tau_m
+        # [12] tau_ext_meas
+        # [13] theta_ref
+        # [14] theta_dot_ref
+        # [15] theta_ddot_ref
+        # [16] obs2_valid (1.0 / 0.0)
+        # [17] r_momentum (obs3)         
+        # [18] tau_ext_rate [Nm/s]       
+        # [19] rate_alarm (1.0 / 0.0)    
+        # [20] p_momentum (M_eff · θ̇)   
         dbg = Float64MultiArray()
         dbg.data = [
-            float(self._theta_hat),           # [0]  theta_hat
-            float(self._theta_dot_hat),       # [1]  theta_dot_hat
-            float(state_residual),            # [2]  state_residual
-            float(self._tau_ext_hat),         # [3]  tau_ext_hat
-            float(torque_residual),           # [4]  torque_residual
-            float(self._state_res_filtered),  # [5]  state_res_filtered
-            float(self._torque_res_filtered), # [6]  torque_res_filtered
-            float(self._theta_meas),          # [7]  theta_meas
-            float(self._theta_dot_meas),      # [8]  theta_dot_meas
-            float(self._tau_m),               # [9]  tau_m
-            float(self._tau_ext_meas),        # [10] tau_ext_meas
-            float(M_eff),                     # [11] M_eff
-            float(proj),                      # [12] proj
-            float(self._theta_ddot_hat),      # [13] theta_ddot_hat
-            float(tau_pass),                  # [14] tau_pass
+            self._theta_hat,                                    # 0
+            self._theta_dot_hat,                                # 1
+            state_res,                                          # 2
+            self._tau_ext_hat if self._obs2_valid else 0.0,     # 3
+            torque_res,                                         # 4
+            self._state_res_filtered,                           # 5
+            self._torque_res_filtered,                          # 6
+            state_rms,                                          # 7
+            torque_rms,                                         # 8
+            self._theta_meas,                                   # 9
+            self._theta_dot_meas,                               # 10
+            self._tau_m,                                        # 11
+            self._tau_ext_meas,                                 # 12
+            self._theta_ref,                                    # 13
+            self._theta_dot_ref,                                # 14
+            self._theta_ddot_ref,                               # 15
+            1.0 if self._obs2_valid else 0.0,                   # 16
+            self._r_momentum,                                   # 17
+            self._tau_ext_rate,                                 # 18
+            1.0 if self._rate_alarm else 0.0,                   # 19
+            p_now,                                              # 20
         ]
         self._pub_debug.publish(dbg)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────────────────────────────────────
-
-def main(args=None):
-    rclpy.init(args=args)
+def main():
+    rclpy.init()
     node = ObserverNode()
     try:
         rclpy.spin(node)

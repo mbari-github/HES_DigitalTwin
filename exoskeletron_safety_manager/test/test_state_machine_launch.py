@@ -11,6 +11,12 @@ import launch_testing.actions
 from launch_ros.actions import Node
 
 
+# colcon build --packages-select exoskeletron_safety_manager
+# source install/setup.bash
+# colcon test --packages-select exoskeletron_safety_manager --event-handlers console_direct+
+# colcon test-result --verbose
+
+
 def generate_test_description():
     """Launch the state_machine_node with safety params."""
     bringup_pkg = get_package_share_directory('exoskeletron_bringup')
