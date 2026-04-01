@@ -6,6 +6,21 @@
 
 namespace functional_safety
 {
+
+/**
+ * TorqueLimitMode — safety plugin that sets the bridge to 'torque_limit' mode.
+ *
+ * In torque_limit mode the bridge applies a hard cap on the commanded torque
+ * (configured via bridge parameter override_tau_limit). This is used when a
+ * moderate fault has been detected that requires a stricter torque bound than
+ * compliant mode but does not yet justify a full stop.
+ *
+ * Bridge mode lifecycle:
+ * - initialize(): requests bridge → 'torque_limit'
+ * - stop() / resume(): re-asserts 'torque_limit' in case the bridge drifted
+ * - shutdown(): does NOT send any mode request.
+ *               The incoming plugin sets the correct bridge mode in its initialize().
+ */
 class TorqueLimitMode : public SafetyTools, protected BridgeModeClient
 {
 public:
@@ -22,7 +37,6 @@ public:
   void pause()    override {}
   void resume()   override { request_mode("torque_limit"); }
 
-  // FIX BUG 2: shutdown() non manda più request_mode("nominal").
   void shutdown() override
   {
     if (node_) {
@@ -32,5 +46,5 @@ public:
 
   void set_safety_params(double) override {}
 };
-}
+}  // namespace functional_safety
 #endif

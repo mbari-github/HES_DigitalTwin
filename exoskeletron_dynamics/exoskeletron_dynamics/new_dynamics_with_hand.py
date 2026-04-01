@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
 """
-new_dynamics_with_hand.py
-=========================
+Full reduced-dynamics ROS2 node with hand model (assembly_with_hand.urdf).
 
-Nodo ROS2 per la simulazione della dinamica ridotta dell'esoscheletro con modello
-della mano (assembly_with_hand.urdf).
+This is the reference implementation. Compared to dynamics_stripped.py it adds:
+  - Cartesian external wrench input (WrenchStamped) mapped to tau_ext_theta via
+    the contact-frame Jacobian.
+  - Extended diagnostics topic /exo_dynamics/model_debug (friction, damping,
+    dynamic residual, model torque error).
+  - Optional CE-point force estimation and RViz Marker publication.
 
-Riscrittura completa del nodo originale, con:
-- stessa architettura di riduzione dinamica su theta = rev_crank
-- stessi topic principali del plant
-- stesso layout di /exo_dynamics/debug e /exo_dynamics/ff_terms
-- topic aggiuntivo /exo_dynamics/model_debug per diagnostica estesa
-
-Equazione ridotta usata:
+The reduced equation of motion is the same in both nodes:
     M_eff * theta_ddot =
         tau_m + tau_pass_theta + tau_ext_theta - proj - tau_fric - tau_damp
 
-dove:
-    M_eff = B^T M B + Jm
-    proj  = B^T (M (Bdot * theta_dot) + h)
+where:
+    M_eff = B^T M B + Jm          (effective scalar inertia)
+    proj  = B^T (M (Bdot * theta_dot) + h)   (centrifugal + gravity projection)
     h     = nonLinearEffects(q, dq)
 """
 
@@ -44,10 +41,10 @@ class ExoReducedDynamicsWithHand(Node):
         super().__init__('exo_reduced_dynamics_with_hand')
 
         # ============================================================
-        # PARAMETRI ROS2
+        # ROS 2 PARAMETERS
         # ============================================================
 
-        # --- Percorso URDF e tempi ---
+        # ── URDF path and timing ──
         self.declare_parameter(
             'urdf_path',
             '/home/mbari/ros2_ws/src/HES_DigitalTwin/exoskeletron_description/urdf/assembly_with_hand.urdf'
@@ -56,48 +53,48 @@ class ExoReducedDynamicsWithHand(Node):
         self.declare_parameter('publish_dt', 0.005)
         self.declare_parameter('theta_init', 0.0)
 
-        # --- Gravità ---
+        # ── Gravity ──
         self.declare_parameter('gravity_zero', False)
 
-        # --- Attriti sul DOF ridotto ---
+        # ── Friction on the reduced DOF (theta = rev_crank) ──
         self.declare_parameter('motor_inertia', 0.1)
         self.declare_parameter('fric_visc', 0.3)
         self.declare_parameter('fric_coul', 0.3)
         self.declare_parameter('fric_eps', 0.01)
         self.declare_parameter('damping_theta', 0.0)
 
-        # --- Limiti di velocità e accelerazione ---
+        # ── Velocity and acceleration limits ──
         self.declare_parameter('max_theta_dot', 10.0)
         self.declare_parameter('max_theta_ddot', 400.0)
 
-        # --- Solver cinematico ---
+        # ── Kinematic solver settings ──
         self.declare_parameter('closure_tol', 1e-5)
         self.declare_parameter('max_nfev', 150)
 
-        # --- Sicurezza numerica ---
+        # ── Numerical safety guard ──
         self.declare_parameter('denom_min', 1e-7)
 
-        # --- Log ---
+        # ── Logging frequency ──
         self.declare_parameter('log_every_n_steps', 200)
 
-        # --- Bounds su theta ---
+        # ── Theta bounds ──
         self.declare_parameter('theta_min', -2.5)
         self.declare_parameter('theta_max', 2.5)
 
-        # --- Stato stuck / limit hold ---
+        # ── Stuck / joint-limit hold recovery ──
         self.declare_parameter('limit_hold', True)
         self.declare_parameter('limit_release_tau', 0.02)
         self.declare_parameter('limit_backoff_step', 0.003)
         self.declare_parameter('limit_backoff_tries', 6)
         self.declare_parameter('limit_use_theta_bounds', True)
 
-        # --- Wrench esterna ---
+        # ── Cartesian external wrench at the contact frame ──
         self.declare_parameter('external_wrench_enable', True)
         self.declare_parameter('external_wrench_frame', 'frame_CE_end_2')
         self.declare_parameter('external_wrench_topic', '/exo_dynamics/external_wrench')
         self.declare_parameter('external_wrench_scale', 1.0)
 
-        # --- Modello passivo falangi ---
+        # ── Passive finger model (Fung exponential spring-damper) ──
         self.declare_parameter('passive_enable', True)
 
         # MCF
@@ -112,24 +109,24 @@ class ExoReducedDynamicsWithHand(Node):
         self.declare_parameter('B_IFP', 0.01)
         self.declare_parameter('rest_IFP', -0.5)
 
-        # Saturazioni modello passivo
+        # ── Passive model saturation ──
         self.declare_parameter('passive_K_MAX', 5.0)
         self.declare_parameter('passive_exp_clip', 12.0)
 
-        # --- Soft bound su giunto mediale ---
+        # ── Soft bound on the medial finger joint ──
         self.declare_parameter('medial_soft_enable', True)
         self.declare_parameter('medial_soft_lower', -2.2)
         self.declare_parameter('medial_soft_upper', 0.0)
         self.declare_parameter('medial_soft_weight', 1.0)
 
-        # --- Stima forza CE ---
+        # ── CE-point force estimation (optional visualization) ──
         self.declare_parameter('ce_force_enable', False)
         self.declare_parameter('ce_force_frame', 'frame_CE_end_2')
         self.declare_parameter('ce_force_marker_scale', 0.02)
         self.declare_parameter('ce_force_marker_diameter', 0.01)
 
         # ============================================================
-        # MODELLO PINOCCHIO
+        # PINOCCHIO MODEL
         # ============================================================
 
         self.urdf_path = str(self.get_parameter('urdf_path').value)
@@ -147,34 +144,34 @@ class ExoReducedDynamicsWithHand(Node):
 
         if bool(self.get_parameter('gravity_zero').value):
             self.model.gravity.linear = np.array([0.0, 0.0, 0.0], dtype=float)
-            self.get_logger().warn("gravity_zero=True: gravità disattivata.")
+            self.get_logger().warn("gravity_zero=True: gravity disabled.")
 
-        # --- Giunto attivo ---
+        # ── Active joint (theta = rev_crank) ──
         self.jid_crank = self.model.getJointId('rev_crank')
         if self.jid_crank <= 0:
-            raise RuntimeError("Joint 'rev_crank' non trovato in URDF.")
+            raise RuntimeError("Joint 'rev_crank' not found in URDF.")
         self.idx_theta = self.jid_crank - 1
 
-        # --- Giunti falangi ---
+        # ── Finger joints (passive spring-damper model) ──
         self.jid_MCF = self.model.getJointId('rev_palmo2prossimale')
         self.jid_IFP = self.model.getJointId('rev_prossimale2mediale')
         if self.jid_MCF <= 0 or self.jid_IFP <= 0:
             raise RuntimeError(
-                "Joint mano (rev_palmo2prossimale / rev_prossimale2mediale) non trovato."
+                "Hand joints (rev_palmo2prossimale / rev_prossimale2mediale) not found in URDF."
             )
 
-        # --- Frame CE ---
+        # ── CE contact frame (used for force estimation) ──
         self.ce_force_enable = bool(self.get_parameter('ce_force_enable').value)
         self.ce_force_frame = str(self.get_parameter('ce_force_frame').value)
         self.fid_CE = self.model.getFrameId(self.ce_force_frame)
         if self.ce_force_enable and self.fid_CE < 0:
             self.get_logger().warning(
-                f"ce_force_enable=True ma frame '{self.ce_force_frame}' non trovato. Disabilito CE force."
+                f"ce_force_enable=True but frame '{self.ce_force_frame}' not found. Disabling CE force."
             )
             self.ce_force_enable = False
 
         # ============================================================
-        # FRAME PAIRS PER LA CHIUSURA CINEMATICA
+        # KINEMATIC CLOSURE FRAME PAIRS
         # ============================================================
 
         self.closure_frame_name_pairs = [
@@ -189,15 +186,15 @@ class ExoReducedDynamicsWithHand(Node):
             ida = self.model.getFrameId(a)
             idb = self.model.getFrameId(b)
             if ida < 0 or idb < 0:
-                self.get_logger().warning(f"Coppia frame non trovata: {a}, {b}")
+                self.get_logger().warning(f"Closure frame pair not found: {a}, {b}")
             else:
                 self.closure_frame_pairs.append((ida, idb))
 
         if len(self.closure_frame_pairs) == 0:
-            self.get_logger().warning("Nessuna coppia frame di chiusura valida.")
+            self.get_logger().warning("No valid closure frame pairs found.")
 
         # ============================================================
-        # DOF DIPENDENTI OTTIMIZZATI DAL SOLVER
+        # DEPENDENT DOFs (optimized by the kinematic closure solver)
         # ============================================================
 
         dep_joint_names = [
@@ -214,7 +211,7 @@ class ExoReducedDynamicsWithHand(Node):
         self.idx_opt = [jid - 1 for jid in dep_ids]
 
         if any(i < 0 for i in self.idx_opt):
-            raise RuntimeError("Uno o più joint del subset cinematico non trovati.")
+            raise RuntimeError("One or more joints in the kinematic subset not found in URDF.")
 
         self.lower = np.array(
             [-2.5, -2.5, -0.015, -2.5, -2.5, -1.5, -2.5, -0.008],
@@ -226,7 +223,7 @@ class ExoReducedDynamicsWithHand(Node):
         )
 
         # ============================================================
-        # STATO RIDOTTO
+        # REDUCED STATE
         # ============================================================
 
         self.theta = float(self.get_parameter('theta_init').value)
@@ -243,7 +240,7 @@ class ExoReducedDynamicsWithHand(Node):
 
         self.tau_m = 0.0
 
-        # --- Wrench esterna ---
+        # ── External wrench state ──
         self.wrench_enable = bool(self.get_parameter('external_wrench_enable').value)
         self.wrench_frame_name = str(self.get_parameter('external_wrench_frame').value)
         self.wrench_topic = str(self.get_parameter('external_wrench_topic').value)
@@ -258,16 +255,16 @@ class ExoReducedDynamicsWithHand(Node):
             self.fid_ext = self.model.getFrameId(self.wrench_frame_name)
             if self.fid_ext < 0:
                 self.get_logger().warning(
-                    f"external_wrench_enable=True ma frame '{self.wrench_frame_name}' non trovato. Disabilito."
+                    f"external_wrench_enable=True but frame '{self.wrench_frame_name}' not found. Disabling."
                 )
                 self.wrench_enable = False
 
-        # --- Passivi ---
+        # ── Passive torques ──
         self.passive_enable = bool(self.get_parameter('passive_enable').value)
         self.tau_pass = np.zeros(self.nv)
         self.tau_pass_theta = 0.0
 
-        # --- Diagnostica base ---
+        # ── Basic diagnostics ──
         self.step_count = 0
         self.last_solver_success = False
         self.last_solver_nfev = 0
@@ -280,7 +277,7 @@ class ExoReducedDynamicsWithHand(Node):
         self.reaction_theta_last = 0.0
         self.tau_full = np.zeros(self.nv)
 
-        # --- Diagnostica dinamica estesa ---
+        # ── Extended dynamics diagnostics (published on /exo_dynamics/model_debug) ──
         self.tau_fric_last = 0.0
         self.tau_damp_last = 0.0
         self.num_last = 0.0
@@ -288,7 +285,7 @@ class ExoReducedDynamicsWithHand(Node):
         self.tau_model_last = 0.0
         self.tau_model_error_last = 0.0
 
-        # --- Stato finecorsa ---
+        # ── Joint limit state ──
         self.at_limit = False
         self.limit_dir = 0.0
         self.have_valid = False
@@ -330,7 +327,7 @@ class ExoReducedDynamicsWithHand(Node):
             self._store_valid_state()
         else:
             self.get_logger().warning(
-                "solve_closure iniziale fallita: partirai in AT_LIMIT finché non rientri."
+                "Initial solve_closure failed: starting in AT_LIMIT until a valid configuration is reached."
             )
             self.at_limit = True
             self.theta_dot = 0.0
@@ -340,7 +337,7 @@ class ExoReducedDynamicsWithHand(Node):
         self.pub_timer = self.create_timer(self.publish_dt, self.publish)
 
         self.get_logger().info(
-            f"ExoReducedDynamicsWithHand avviato | URDF={self.urdf_path} | "
+            f"ExoReducedDynamicsWithHand started | URDF={self.urdf_path} | "
             f"passive_enable={self.passive_enable} | wrench_enable={self.wrench_enable}"
         )
 
@@ -476,7 +473,7 @@ class ExoReducedDynamicsWithHand(Node):
         return q_sol, info
 
     # ============================================================
-    # VETTORE DI PROIEZIONE B = dq/dtheta
+    # PROJECTION VECTOR B = dq/dtheta
     # ============================================================
 
     def compute_B(self, q: np.ndarray) -> np.ndarray:
@@ -511,7 +508,7 @@ class ExoReducedDynamicsWithHand(Node):
         return e_theta + x
 
     # ============================================================
-    # WRENCH ESTERNA
+    # EXTERNAL WRENCH → tau_ext_theta
     # ============================================================
 
     def compute_tau_ext(self, q: np.ndarray) -> None:
@@ -531,7 +528,7 @@ class ExoReducedDynamicsWithHand(Node):
         self.tau_ext_theta = float(self.B.T @ self.tau_ext)
 
     # ============================================================
-    # TORQUES PASSIVI
+    # PASSIVE TORQUES (Fung exponential spring-damper on finger joints)
     # ============================================================
 
     def compute_passive_torques(self, q: np.ndarray, dq: np.ndarray) -> None:
@@ -582,7 +579,7 @@ class ExoReducedDynamicsWithHand(Node):
         self.tau_pass_theta = float(self.B.T @ self.tau_pass)
 
     # ============================================================
-    # FINECORSA / STUCK
+    # JOINT LIMITS / STUCK RECOVERY
     # ============================================================
 
     def _theta_within_bounds(self, theta: float) -> bool:
@@ -651,14 +648,14 @@ class ExoReducedDynamicsWithHand(Node):
         return False
 
     # ============================================================
-    # STEP DINAMICO
+    # DYNAMICS STEP
     # ============================================================
 
     def step(self) -> None:
         self.step_count += 1
         logN = max(1, int(self.get_parameter('log_every_n_steps').value))
 
-        # 0) Se sono in AT_LIMIT, provo a rilasciare
+        # 0) If stuck at limit, attempt release
         if self.at_limit:
             released = self._stuck_try_release()
             if not released:
@@ -666,10 +663,10 @@ class ExoReducedDynamicsWithHand(Node):
                 self.ddq[:] = 0.0
                 return
 
-        # 1) Theta entro bounds
+        # 1) Clamp theta within configured bounds
         self.theta = self._clamp_theta_bounds(self.theta)
 
-        # 2) Risolvi chiusura cinematica per theta corrente
+        # 2) Kinematic closure for current theta
         q_new, info = self.solve_closure(self.theta, update_warmstart=True)
         self.last_solver_success = bool(info['success'])
         self.last_solver_nfev = int(info['nfev'])
@@ -690,13 +687,13 @@ class ExoReducedDynamicsWithHand(Node):
 
             if self.step_count % logN == 0:
                 self.get_logger().warning(
-                    f"[step {self.step_count}] solve_closure fallita -> AT_LIMIT | "
+                    f"[step {self.step_count}] solve_closure failed -> AT_LIMIT | "
                     f"closure_norm={self.last_closure_norm:.3e} nfev={self.last_solver_nfev} "
                     f"hit_bounds={self.last_hit_bounds}"
                 )
             return
 
-        # 3) Aggiorna cinematica e B
+        # 3) Update kinematics and projection vector B
         self.q = q_new
         self.B_prev = self.B.copy()
         self.B = self.compute_B(self.q)
@@ -705,19 +702,19 @@ class ExoReducedDynamicsWithHand(Node):
 
         Bdot = (self.B - self.B_prev) / self.dt
 
-        # 4) dq, ddq preliminari
+        # 4) Preliminary dq, ddq
         self.dq = self.B * self.theta_dot
         self.ddq = self.B * self.theta_ddot + Bdot * self.theta_dot
 
-        # 5) Dinamica completa
+        # 5) Full dynamics: mass matrix and nonlinear effects
         M = pin.crba(self.model, self.data, self.q)
         h = pin.nonLinearEffects(self.model, self.data, self.q, self.dq)
 
-        # 6) Ingressi esterni e passivi
+        # 6) External wrench and passive torques
         self.compute_tau_ext(self.q)
         self.compute_passive_torques(self.q, self.dq)
 
-        # 7) Scalari ridotti
+        # 7) Reduced scalar quantities (effective inertia, gravity+centrifugal projection)
         denom_mech = float(self.B.T @ (M @ self.B))
         Jm = float(self.get_parameter('motor_inertia').value)
         denom = denom_mech + Jm
@@ -741,12 +738,12 @@ class ExoReducedDynamicsWithHand(Node):
 
             if self.step_count % logN == 0:
                 self.get_logger().warning(
-                    f"[step {self.step_count}] denom TOO SMALL -> AT_LIMIT | "
+                    f"[step {self.step_count}] effective inertia too small -> AT_LIMIT | "
                     f"denom={denom:.3e} (mech={denom_mech:.3e}+Jm={Jm:.3e})"
                 )
             return
 
-        # 8) Attrito + damping
+        # 8) Friction and damping on theta
         b = float(self.get_parameter('fric_visc').value)
         fc = float(self.get_parameter('fric_coul').value)
         eps = float(self.get_parameter('fric_eps').value)
@@ -756,7 +753,7 @@ class ExoReducedDynamicsWithHand(Node):
         damping_theta = float(self.get_parameter('damping_theta').value)
         tau_damp = damping_theta * self.theta_dot
 
-        # 9) Equazione del moto scalare
+        # 9) Scalar equation of motion
         num = (
             self.tau_m
             + self.tau_pass_theta
@@ -767,7 +764,7 @@ class ExoReducedDynamicsWithHand(Node):
         max_dd = float(self.get_parameter('max_theta_ddot').value)
         self.theta_ddot = float(np.clip(self.theta_ddot, -max_dd, max_dd))
 
-        # 10) Diagnostica estesa
+        # 10) Extended diagnostics
         self.tau_fric_last = float(tau_fric)
         self.tau_damp_last = float(tau_damp)
         self.num_last = float(num)
@@ -785,7 +782,7 @@ class ExoReducedDynamicsWithHand(Node):
 
         self.tau_model_error_last = float(self.tau_m - self.tau_model_last)
 
-        # 11) Integrazione Eulero esplicito
+        # 11) Explicit Euler integration
         self.theta_dot += self.theta_ddot * self.dt
         max_d = float(self.get_parameter('max_theta_dot').value)
         self.theta_dot = float(np.clip(self.theta_dot, -max_d, max_d))
@@ -807,21 +804,21 @@ class ExoReducedDynamicsWithHand(Node):
 
         self.theta = float(theta_next)
 
-        # 12) dq, ddq finali
+        # 12) Final dq, ddq after integration
         self.dq = self.B * self.theta_dot
         self.ddq = self.B * self.theta_ddot + Bdot * self.theta_dot
 
-        # 13) Tau full da RNEA
+        # 13) Full joint torques via RNEA (used in /joint_states effort field)
         tau_rnea = pin.rnea(self.model, self.data, self.q, self.dq, self.ddq)
         self.tau_full = (tau_rnea - self.tau_ext - self.tau_pass).copy()
 
-        # 14) Reazione equivalente su theta
+        # 14) Equivalent reaction torque on theta (diagnostic)
         self.reaction_theta_last = float(
             self.proj_last + tau_fric + tau_damp
             - (self.tau_m + self.tau_pass_theta + self.tau_ext_theta)
         )
 
-        # Logging opzionale
+        # Optional logging on terminal
         # if self.step_count % logN == 0:
         #     self.get_logger().info(
         #         f"[step {self.step_count}] theta={self.theta:.4f} thdot={self.theta_dot:.4f} "
@@ -835,7 +832,7 @@ class ExoReducedDynamicsWithHand(Node):
         #     )
 
     # ============================================================
-    # STIMA FORZA AL PUNTO CE
+    # CE CONTACT POINT FORCE ESTIMATION
     # ============================================================
 
     def _publish_ce_force(self) -> None:

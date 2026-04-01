@@ -1,112 +1,116 @@
 #!/usr/bin/env python3
 """
+ROS2 node for controlled fault injection on the exoskeleton digital twin
+(plant + admittance controller + trajectory controller).
 
-Nodo ROS2 per la fault injection controllata sull'architettura del digital twin
-dell'esoscheletro (plant + admittance controller + trajectory controller).
+Working principle
+-----------------
+The node acts as a proxy on one of four critical topics in the architecture.
+It subscribes to the original topic, optionally corrupts the message, and
+republishes on a "_faulted" topic. The rest of the architecture is remapped
+to use the faulted topic via the ROS2 launch file (see remapping section below).
 
-Principio di funzionamento
----------------------------
-Il nodo si inserisce come proxy su uno dei quattro topic critici dell'architettura:
+Channels
+--------
+  CHANNEL 0 — /exo_dynamics/tau_ext_theta  (Float64)
+    Simulates a fault in the estimated user force projected onto theta.
+    Example: degraded wrist force sensor, bias in the wrench estimate.
 
-  CANALE 0 — /exo_dynamics/tau_ext_theta  (Float64)
-    Simula un guasto nella stima della forza utente proiettata su theta.
-    Es: sensore forza al polso degradato, bias nella stima della wrench.
+  CHANNEL 1 — /trajectory_ref  (Float64MultiArray: [theta_ref, theta_dot_ref, theta_ddot_ref])
+    Simulates a fault in the outer loop (stuck admittance controller,
+    corrupted reference, oscillation in the position/velocity reference).
 
-  CANALE 1 — /trajectory_ref  (Float64MultiArray: [theta_ref, theta_dot_ref, theta_ddot_ref])
-    Simula un guasto nell'outer loop (admittance controller bloccato,
-    riferimento corrotto, oscillazione nel riferimento di posizione/velocità).
+  CHANNEL 2 — /torque  (Float64)
+    Simulates a fault in the inner loop (trajectory controller).
+    Corresponds to the scenario "error in the velocity/position control of a finger":
+    the actuated torque does not match the commanded torque.
 
-  CANALE 2 — /torque  (Float64)
-    Simula un guasto nell'inner loop (trajectory controller).
-    Corrisponde allo scenario "errore nel controllo di velocità/posizione di un dito"
-    descritto dall'azienda: la coppia attuata non corrisponde a quella comandata.
+  CHANNEL 3 — /joint_states  (sensor_msgs/JointState)
+    Simulates a fault in the position sensor (encoder) in the feedback path.
+    The fault is applied to theta (position) and/or theta_dot (velocity) of the
+    joint 'rev_crank', leaving all other joints in the message untouched.
+    Example: encoder drift, noise on position signal, frozen reading.
 
-  CANALE 3 — /joint_states  (sensor_msgs/JointState)
-    Simula un guasto sul sensore di posizione (encoder) nel ramo di retroazione.
-    Il fault viene applicato a theta (posizione) e/o theta_dot (velocità) del
-    joint 'rev_crank', lasciando intatti tutti gli altri joint del messaggio.
-    Es: drift dell'encoder, rumore sul segnale di posizione, lettura congelata.
+Fault modes
+-----------
+  none    — transparent pass-through, no signal alteration
+  offset  — adds a constant bias to the signal
+  noise   — adds continuous Gaussian noise
+  freeze  — completely blocks publication of the faulted topic
+  scale   — multiplies the signal by a factor (e.g. 0.0 → zero torque)
+  spike   — injects a single impulse of amplitude fault_magnitude, then reverts
 
-Modalità di fault disponibili
-------------------------------
-  none    — trasparente, il nodo non altera il segnale
-  offset  — somma un bias costante al segnale (o al primo elemento per MultiArray)
-  noise   — aggiunge rumore gaussiano a campionamento continuo
-  freeze  — blocca completamente la pubblicazione del topic faultato
-  scale   — moltiplica il segnale per un fattore (es. 0.0 → coppia nulla)
-  spike   — inietta un impulso singolo di ampiezza fault_magnitude, poi torna trasparente
-
-La fault è attivabile/disattivabile a runtime senza riavviare il nodo:
+Faults can be activated/deactivated at runtime without restarting the node:
     ros2 param set /fault_injector fault_active true
     ros2 param set /fault_injector fault_type offset
     ros2 param set /fault_injector fault_magnitude 2.0
 
-Schema di remapping
---------------------
-Il nodo si abbona al topic originale e pubblica su un topic "_faulted".
-Per inserirlo nell'architettura senza modificare gli altri nodi, usare il
-remapping ROS2 nel launch file:
+Remapping schema
+----------------
+The node subscribes to the original topic and publishes on a "_faulted" topic.
+To insert it into the architecture without modifying other nodes, use ROS2
+topic remapping in the launch file:
 
-    # Nel launch file:
-    # 1. fault_injector si abbona a /torque (originale dal trajectory_controller)
-    # 2. fault_injector pubblica su /torque_faulted
-    # 3. il plant viene riavviato con remapping /torque → /torque_faulted
+    # In the launch file:
+    # 1. fault_injector subscribes to /torque (original from trajectory_controller)
+    # 2. fault_injector publishes to /torque_faulted
+    # 3. the plant is launched with remapping /torque → /torque_faulted
 
 Topics
 ------
-  CANALE 0:
+  CHANNEL 0:
     Sub:  /exo_dynamics/tau_ext_theta         std_msgs/Float64
     Pub:  /exo_dynamics/tau_ext_theta_faulted std_msgs/Float64
 
-  CANALE 1:
+  CHANNEL 1:
     Sub:  /trajectory_ref                     std_msgs/Float64MultiArray
     Pub:  /trajectory_ref_faulted             std_msgs/Float64MultiArray
 
-  CANALE 2:
+  CHANNEL 2:
     Sub:  /torque                             std_msgs/Float64
     Pub:  /torque_faulted                     std_msgs/Float64
 
-  CANALE 3:
+  CHANNEL 3:
     Sub:  /joint_states                       sensor_msgs/JointState
     Pub:  /joint_states_faulted               sensor_msgs/JointState
 
-  Sempre:
+  Always:
     Pub:  /fault_injector/status              std_msgs/Float64MultiArray
           Layout: [channel, fault_type_id, fault_active, fault_magnitude,
                    n_injections, last_raw, last_faulted, delta]
 
-Parametri ROS2
---------------
-  channel           (int,   default 2)        canale su cui iniettare il fault
+ROS2 Parameters
+---------------
+  channel           (int,   default 2)        channel to inject fault on
                                               0=tau_ext_theta, 1=trajectory_ref,
                                               2=torque, 3=joint_states
-  fault_active      (bool,  default False)    attiva/disattiva la fault injection
-  fault_type        (str,   default 'offset') tipo di fault: none/offset/noise/freeze/scale/spike
-  fault_magnitude   (float, default 1.0)      ampiezza del fault
-  noise_std         (float, default 0.1)      deviazione standard del rumore (solo fault_type=noise)
-  target_index      (int,   default 0)        indice del Float64MultiArray da corrompere (solo canale 1)
+  fault_active      (bool,  default False)    enable/disable fault injection
+  fault_type        (str,   default 'offset') fault type: none/offset/noise/freeze/scale/spike
+  fault_magnitude   (float, default 1.0)      fault amplitude
+  noise_std         (float, default 0.1)      Gaussian noise std dev (fault_type=noise only)
+  target_index      (int,   default 0)        Float64MultiArray element to corrupt (channel 1 only)
                                               0=theta_ref, 1=theta_dot_ref, 2=theta_ddot_ref
-  fault_js_field    (str,   default 'position') campo JointState da corrompere (solo canale 3)
+  fault_js_field    (str,   default 'position') JointState field to corrupt (channel 3 only)
                                               'position' → theta, 'velocity' → theta_dot, 'both'
-  joint_name        (str,   default 'rev_crank') nome del joint da corrompere (solo canale 3)
-  publish_rate      (float, default 200.0)    Hz del topic di stato /fault_injector/status
-  spike_duration    (float, default 0.05)     durata dello spike in secondi (solo fault_type=spike)
+  joint_name        (str,   default 'rev_crank') joint name to corrupt (channel 3 only)
+  publish_rate      (float, default 200.0)    status topic rate [Hz]
+  spike_duration    (float, default 0.05)     spike duration [s] (fault_type=spike only)
 
-Esempio di utilizzo
---------------------
-  # Terminale 1: avvio nodo
+Usage example
+-------------
+  # Terminal 1: start node
   ros2 run <pkg> fault_injector --ros-args -p channel:=2 -p fault_type:=offset -p fault_magnitude:=3.0
 
-  # Terminale 2: attivazione a runtime
+  # Terminal 2: activate at runtime
   ros2 param set /fault_injector fault_active true
 
-  # Terminale 3: cambio tipo a runtime
+  # Terminal 3: change type at runtime
   ros2 param set /fault_injector fault_type freeze
 
-  # Terminale 4: disattivazione
+  # Terminal 4: deactivate
   ros2 param set /fault_injector fault_active false
 
-  # Monitoraggio stato
+  # Monitor status
   ros2 topic echo /fault_injector/status
 """
 
@@ -120,7 +124,7 @@ from sensor_msgs.msg import JointState
 
 
 # ============================================================
-# Mappa fault_type (stringa) → ID numerico per il topic status
+# Fault type string → numeric ID (used in the status topic)
 # ============================================================
 FAULT_TYPE_MAP = {
     'none':   0,
@@ -132,7 +136,7 @@ FAULT_TYPE_MAP = {
 }
 
 # ============================================================
-# Descrizione dei canali
+# Channel metadata
 # ============================================================
 CHANNEL_INFO = {
     0: {
@@ -140,28 +144,28 @@ CHANNEL_INFO = {
         'sub_topic': '/exo_dynamics/tau_ext_theta',
         'pub_topic': '/exo_dynamics/tau_ext_theta_faulted',
         'msg_type': 'Float64',
-        'description': 'Forza utente proiettata su theta (sensore forza)',
+        'description': 'User force projected onto theta (force sensor)',
     },
     1: {
         'name': 'trajectory_ref',
         'sub_topic': '/trajectory_ref',
         'pub_topic': '/trajectory_ref_faulted',
         'msg_type': 'Float64MultiArray',
-        'description': 'Riferimento traiettoria [theta_ref, theta_dot_ref, theta_ddot_ref]',
+        'description': 'Trajectory reference [theta_ref, theta_dot_ref, theta_ddot_ref]',
     },
     2: {
         'name': 'torque',
         'sub_topic': '/torque',
         'pub_topic': '/torque_faulted',
         'msg_type': 'Float64',
-        'description': 'Coppia attuata (inner loop / dito)',
+        'description': 'Actuated torque (inner loop / finger)',
     },
     3: {
         'name': 'joint_states',
         'sub_topic': '/joint_states',
         'pub_topic': '/joint_states_faulted',
         'msg_type': 'JointState',
-        'description': 'Sensore di posizione/velocità encoder (ramo di retroazione)',
+        'description': 'Position/velocity encoder sensor (feedback path)',
     },
 }
 
@@ -172,7 +176,7 @@ class FaultInjector(Node):
         super().__init__('fault_injector')
 
         # ============================================================
-        # PARAMETRI
+        # PARAMETERS
         # ============================================================
         self.declare_parameter('channel',         2)
         self.declare_parameter('fault_active',    False)
@@ -190,18 +194,18 @@ class FaultInjector(Node):
 
         if channel not in CHANNEL_INFO:
             self.get_logger().error(
-                f"Canale {channel} non valido. Scegliere tra {list(CHANNEL_INFO.keys())}."
+                f"Invalid channel {channel}. Choose from {list(CHANNEL_INFO.keys())}."
             )
-            raise ValueError(f"Canale non valido: {channel}")
+            raise ValueError(f"Invalid channel: {channel}")
 
         self._channel = channel
         self._ch_info = CHANNEL_INFO[channel]
 
         # ============================================================
-        # STATO INTERNO
+        # INTERNAL STATE
         # ============================================================
-        self._frozen_value = None
-        self._freeze_logged = False
+        self._frozen_value = None     # first value seen when freeze was activated
+        self._freeze_logged = False   # prevents repeated log messages during freeze
         self._n_injections = 0
         self._last_raw = 0.0
         self._last_faulted = 0.0
@@ -210,7 +214,7 @@ class FaultInjector(Node):
         self._spike_start_time = None
 
         # ============================================================
-        # ROS I/O — subscriber e publisher dipendenti dal canale
+        # ROS I/O — subscriber and publisher depend on the channel type
         # ============================================================
         if self._ch_info['msg_type'] == 'Float64':
             self._sub = self.create_subscription(
@@ -263,14 +267,14 @@ class FaultInjector(Node):
         )
 
         self.get_logger().info(
-            f"FaultInjector avviato\n"
-            f"  Canale          : {channel} — {self._ch_info['description']}\n"
+            f"FaultInjector started\n"
+            f"  Channel         : {channel} — {self._ch_info['description']}\n"
             f"  Sub topic       : {self._ch_info['sub_topic']}\n"
             f"  Pub topic       : {self._ch_info['pub_topic']}\n"
             f"  fault_active    : {self.get_parameter('fault_active').value}\n"
             f"  fault_type      : {self.get_parameter('fault_type').value}\n"
             f"  fault_magnitude : {self.get_parameter('fault_magnitude').value}\n"
-            f"\nPer attivare a runtime:\n"
+            f"\nTo activate at runtime:\n"
             f"  ros2 param set /fault_injector fault_active true\n"
             f"  ros2 param set /fault_injector fault_type freeze\n"
             f"  ros2 param set /fault_injector fault_magnitude 2.0"
@@ -290,16 +294,17 @@ class FaultInjector(Node):
 
     def _is_hard_freeze_active(self) -> bool:
         """
-        Freeze 'hard': il nodo continua a ricevere ma NON pubblica nulla
-        sul topic faultato.
+        Hard freeze: the node keeps receiving messages but publishes NOTHING
+        on the faulted topic, simulating a dead publisher.
         """
         fault_active, fault_type, _, _, _ = self._current_fault_config()
         return fault_active and fault_type == 'freeze'
 
     def _reset_transient_states_if_needed(self):
         """
-        Se freeze/spike non sono attivi, resetta lo stato interno relativo.
-        Utile quando si cambia fault_type a runtime.
+        Reset internal freeze/spike state when those fault types are no longer active.
+        Called at the top of every callback so that switching fault_type at runtime
+        cleanly resets the previous transient state.
         """
         fault_active, fault_type, _, _, _ = self._current_fault_config()
 
@@ -312,13 +317,13 @@ class FaultInjector(Node):
             self._spike_start_time = None
 
     # ============================================================
-    # CALLBACKS — ricezione messaggi
+    # CALLBACKS — message reception
     # ============================================================
 
     def _cb_float64(self, msg: Float64):
         """
-        Callback per canali Float64 (tau_ext_theta, torque).
-        Se freeze è attivo, il nodo non pubblica nulla.
+        Callback for Float64 channels (tau_ext_theta, torque).
+        If hard freeze is active, nothing is published on the faulted topic.
         """
         self._reset_transient_states_if_needed()
 
@@ -332,8 +337,8 @@ class FaultInjector(Node):
 
             if not self._freeze_logged:
                 self.get_logger().info(
-                    f"[FREEZE] Publishing bloccato su {self._ch_info['pub_topic']}. "
-                    f"Ultimo valore osservato: {raw_val:.6f}"
+                    f"[FREEZE] Publishing blocked on {self._ch_info['pub_topic']}. "
+                    f"Last observed value: {raw_val:.6f}"
                 )
                 self._freeze_logged = True
 
@@ -349,8 +354,8 @@ class FaultInjector(Node):
 
     def _cb_multiarray(self, msg: Float64MultiArray):
         """
-        Callback per canale Float64MultiArray (trajectory_ref).
-        Se freeze è attivo, il nodo non pubblica nulla.
+        Callback for Float64MultiArray channel (trajectory_ref).
+        If hard freeze is active, nothing is published on the faulted topic.
         """
         self._reset_transient_states_if_needed()
 
@@ -373,8 +378,8 @@ class FaultInjector(Node):
 
             if not self._freeze_logged:
                 self.get_logger().info(
-                    f"[FREEZE] Publishing bloccato su {self._ch_info['pub_topic']}. "
-                    f"Ultimo valore osservato: {raw_val:.6f}"
+                    f"[FREEZE] Publishing blocked on {self._ch_info['pub_topic']}. "
+                    f"Last observed value: {raw_val:.6f}"
                 )
                 self._freeze_logged = True
 
@@ -392,8 +397,8 @@ class FaultInjector(Node):
 
     def _cb_joint_states(self, msg: JointState):
         """
-        Callback per canale 3 — JointState.
-        Se freeze è attivo, il nodo non pubblica nulla.
+        Callback for channel 3 — JointState.
+        If hard freeze is active, nothing is published on the faulted topic.
         """
         self._reset_transient_states_if_needed()
 
@@ -423,8 +428,8 @@ class FaultInjector(Node):
 
             if not self._freeze_logged:
                 self.get_logger().info(
-                    f"[FREEZE] Publishing bloccato su {self._ch_info['pub_topic']} "
-                    f"per joint '{joint_name}'."
+                    f"[FREEZE] Publishing blocked on {self._ch_info['pub_topic']} "
+                    f"for joint '{joint_name}'."
                 )
                 self._freeze_logged = True
 
@@ -465,10 +470,10 @@ class FaultInjector(Node):
 
     def _apply_fault_scalar(self, value: float) -> float:
         """
-        Applica la fault al valore scalare in ingresso.
-        Restituisce il valore modificato.
-        Nota: il caso freeze è gestito nelle callback come blocco totale
-        della pubblicazione, quindi qui non viene più usato.
+        Apply the configured fault to a scalar input value.
+        Returns the (possibly corrupted) output value.
+        Note: the 'freeze' case is handled in the callbacks as a full publication
+        block, so it should never reach this method.
         """
         fault_active, fault_type, fault_magnitude, noise_std, spike_duration = self._current_fault_config()
 
@@ -495,8 +500,8 @@ class FaultInjector(Node):
                 self._spike_active = True
                 self._spike_start_time = now
                 self.get_logger().info(
-                    f"[SPIKE] Impulso iniettato: {fault_magnitude:.4f}, "
-                    f"durata {spike_duration:.3f} s"
+                    f"[SPIKE] Impulse injected: {fault_magnitude:.4f}, "
+                    f"duration {spike_duration:.3f} s"
                 )
 
             elapsed = now - self._spike_start_time
@@ -507,28 +512,28 @@ class FaultInjector(Node):
                 return value
 
         elif fault_type == 'freeze':
-            # Non dovrebbe arrivarci, perché freeze è gestito nelle callback.
+            # Should not be reached: freeze is handled entirely in the callbacks.
             return value
 
         else:
             self.get_logger().warn(
-                f"fault_type '{fault_type}' non riconosciuto. "
-                f"Valori validi: none, offset, noise, freeze, scale, spike"
+                f"Unrecognised fault_type '{fault_type}'. "
+                f"Valid values: none, offset, noise, freeze, scale, spike"
             )
             return value
 
     # ============================================================
-    # PUBBLICAZIONE STATO
+    # STATUS PUBLICATION
     # ============================================================
 
     def _publish_status(self):
         """
-        Pubblica lo stato del fault injector su /fault_injector/status.
+        Publish fault injector state on /fault_injector/status.
 
-        Layout Float64MultiArray:
+        Float64MultiArray layout:
           [0]  channel
           [1]  fault_type_id
-          [2]  fault_active
+          [2]  fault_active (1.0 / 0.0)
           [3]  fault_magnitude
           [4]  n_injections
           [5]  last_raw

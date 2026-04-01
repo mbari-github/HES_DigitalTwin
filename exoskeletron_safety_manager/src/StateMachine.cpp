@@ -4,7 +4,7 @@ namespace functional_safety
 {
 
 // ════════════════════════════════════════════════════════════════════
-// Costruttore
+// Constructor
 // ════════════════════════════════════════════════════════════════════
 
 StateMachine::StateMachine()
@@ -19,7 +19,7 @@ StateMachine::StateMachine()
   this->declare_parameter("fault_monitor.downgrade_count_threshold", 2000);
   this->declare_parameter("fault_monitor.downgrade_negative_weight", 5);
 
-  // FIX 2: parametri bridge liveness
+  // Bridge supervision parameters
   this->declare_parameter("bridge_liveness_timeout_sec", 0.5);
   this->declare_parameter("bridge_liveness_grace_sec",   3.0);
 
@@ -76,7 +76,7 @@ void StateMachine::initialize()
     std::bind(&StateMachine::reset_safety_callback, this,
       std::placeholders::_1, std::placeholders::_2));
 
-  // ── Subscription per downgrade + liveness + coherence ────────────
+  // ── Subscription for downgrade + liveness + coherence checks ─────
   bridge_status_sub_ =
     this->create_subscription<std_msgs::msg::Float64MultiArray>(
       "/exo_bridge/status", 10,
@@ -90,7 +90,7 @@ void StateMachine::initialize()
   status_pub_ = this->create_publisher<exoskeletron_safety_msgs::msg::SafetyStatus>(
     "/safety_manager/status", 10);
 
-  // Pubblica a 10Hz — ora include anche il check bridge liveness
+  // Status timer at 10 Hz — also drives the bridge liveness check
   status_timer_ = this->create_wall_timer(
     std::chrono::milliseconds(100),
     std::bind(&StateMachine::publish_status, this));
@@ -117,13 +117,13 @@ void StateMachine::initialize()
 }
 
 // ════════════════════════════════════════════════════════════════════
-// Publisher stato — ora include bridge liveness check
+// Status publisher — also drives the bridge liveness check
 // ════════════════════════════════════════════════════════════════════
 
 void StateMachine::publish_status()
 {
-  // FIX 2: controlla bridge liveness a ogni tick (10Hz).
-  // Riusa il timer esistente, nessun timer aggiuntivo.
+  // Liveness check is piggybacked on the 10 Hz status timer
+  // to avoid creating a separate timer.
   check_bridge_liveness();
 
   if (!status_pub_) return;
@@ -150,7 +150,7 @@ void StateMachine::publish_status()
       100.0 * counter_exit_torque_limit_ / downgrade_count_threshold_ : 0.0;
   }
 
-  // FIX 4: nuovi campi diagnostici
+  // Bridge supervision diagnostics
   msg.bridge_alive          = bridge_alive_;
   msg.bridge_mode_coherent  = bridge_mode_coherent_;
 
@@ -170,7 +170,7 @@ void StateMachine::publish_status_string()
 }
 
 // ════════════════════════════════════════════════════════════════════
-// Transizioni
+// State transitions
 // ════════════════════════════════════════════════════════════════════
 
 bool StateMachine::change_state(const std::string & state, const std::string & reason)
@@ -178,12 +178,12 @@ bool StateMachine::change_state(const std::string & state, const std::string & r
   try {
     transition_in_progress_ = true;
 
-    // FIX BUG 2: NON chiamare shutdown() sul plugin uscente.
-    // Il vecchio plugin faceva request_mode("nominal") nel suo shutdown(),
-    // creando un transitorio pericoloso (bridge brevemente in "nominal"
-    // prima che il nuovo plugin imposti il modo corretto).
-    // Ora il ciclo di vita è: reset il vecchio → crea il nuovo →
-    // il nuovo imposta il bridge nel suo initialize().
+    // Unload the outgoing plugin safely.
+    // The outgoing plugin must NOT call request_mode() in its stop() or shutdown(),
+    // because that would set the bridge to the wrong mode (e.g. "nominal") just before
+    // the incoming plugin sets the correct one. Any brief window where the bridge is
+    // in "nominal" without protection could allow dangerous torques. Instead, the
+    // incoming plugin sets the bridge mode exclusively in its initialize().
     if (obj_) {
       obj_->stop();
       obj_.reset();
@@ -207,8 +207,9 @@ bool StateMachine::change_state(const std::string & state, const std::string & r
       "unspecified" : reason;
     transition_in_progress_ = false;
 
-    // FIX 3: reset del contatore mismatch alla transizione, perché il
-    // bridge impiega 1-2 cicli ad aggiornare il mode_id dopo il cambio.
+    // Reset the mismatch counter after every transition: the bridge takes 1-2 cycles
+    // to update its reported mode_id, so the first few coherence checks after a
+    // transition are expected to mismatch.
     mode_mismatch_count_ = 0;
 
     RCLCPP_INFO(this->get_logger(),
@@ -254,7 +255,9 @@ bool StateMachine::request_state_change(
   return change_state(state_to_plugin_name(target_state), reason);
 }
 
-// FIX BUG 1: SAFE_STOP ora permette la transizione verso FAULT_MONITOR.
+// Allowed transition table.
+// SAFE_STOP can transition to FAULT_MONITOR (via /reset_safety_request only,
+// enforced by safe_stop_latched_ in request_state_change).
 bool StateMachine::can_transition_to(
   functional_safety::SafetyState target_state) const
 {
@@ -420,7 +423,8 @@ void StateMachine::torque_limit_callback(
   response->message = "TORQUE_LIMIT_MODE already inactive";
 }
 
-// FIX BUG 1/4: reset_safety ora passa per request_state_change.
+// Reset goes through request_state_change to ensure the transition table is
+// respected and the latch cannot be cleared from an invalid state.
 void StateMachine::reset_safety_callback(
   const std::shared_ptr<std_srvs::srv::Trigger::Request>,
   std::shared_ptr<std_srvs::srv::Trigger::Response> response)
@@ -445,25 +449,28 @@ void StateMachine::reset_safety_callback(
 // Bridge status callback
 // ════════════════════════════════════════════════════════════════════
 //
-// FIX 2/3: il callback ora SEMPRE (prima del return early per downgrade):
-//   1. Aggiorna last_bridge_status_time_ e bridge_alive_
-//   2. Verifica coerenza mode_id vs current_state_
+// This callback performs two tasks unconditionally on every message:
+//   1. Updates the liveness timestamp and alive flag.
+//   2. Checks mode coherence between the bridge's reported mode_id and
+//      the expected ID for the current state.
 //
-// Il resto (downgrade automatico) è invariato.
+// The automatic downgrade logic is conditional on enable_automatic_downgrade_
+// and only runs in COMPLIANT or TORQUE_LIMIT states.
 
 void StateMachine::bridge_status_callback(
   const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
   if (msg->data.size() < 9) return;
 
-  // ── FIX 2: aggiorna liveness (SEMPRE) ───────────────────────────
+  // ── Update liveness (always) ──────────────────────────────────────
   last_bridge_status_time_ = this->now();
   bridge_ever_seen_ = true;
   bridge_alive_ = true;
 
-  // ── FIX 3: verifica coerenza mode_id (SEMPRE) ──────────────────
-  // Salta durante le transizioni: il bridge impiega 1-2 cicli
-  // ad aggiornare il mode_id dopo il cambio.
+  // ── Check mode coherence (always, skip during transitions) ────────
+  // During transitions the bridge takes 1-2 cycles to update mode_id,
+  // so the mismatch counter is reset in change_state() and coherence
+  // checks are skipped while transition_in_progress_ is true.
   const int bridge_mode_id = static_cast<int>(msg->data[7]);
   const int expected_id    = expected_bridge_mode_id();
 
@@ -488,7 +495,7 @@ void StateMachine::bridge_status_callback(
     bridge_mode_coherent_ = true;
   }
 
-  // ── Downgrade automatico (logica originale invariata) ────────────
+  // ── Automatic downgrade (only when enabled and in a limited mode) ─
   if (!enable_automatic_downgrade_) return;
 
   if (current_state_ != functional_safety::SafetyState::COMPLIANT_MODE &&
@@ -506,7 +513,7 @@ void StateMachine::bridge_status_callback(
 }
 
 // ════════════════════════════════════════════════════════════════════
-// Downgrade automatico (invariato rispetto all'originale)
+// Automatic downgrade
 // ════════════════════════════════════════════════════════════════════
 
 void StateMachine::evaluate_downgrade(double tau_in, double theta_dot)
@@ -514,7 +521,7 @@ void StateMachine::evaluate_downgrade(double tau_in, double theta_dot)
   const double abs_tau = std::abs(tau_in);
   const double abs_vel = std::abs(theta_dot);
 
-  // ── Da TORQUE_LIMIT ──────────────────────────────────────────────
+  // ── From TORQUE_LIMIT ─────────────────────────────────────────────
   if (current_state_ == functional_safety::SafetyState::TORQUE_LIMIT_MODE) {
     const bool positive = (abs_tau < tau_torque_limit_exit_) &&
                           (abs_vel < vel_torque_limit_exit_);
@@ -541,6 +548,8 @@ void StateMachine::evaluate_downgrade(double tau_in, double theta_dot)
       counter_exit_torque_limit_ = 0;
       counter_exit_compliant_    = 0;
 
+      // If torque and velocity are also below the compliant thresholds,
+      // skip compliant and go directly back to FAULT_MONITOR.
       if (abs_tau < tau_compliant_exit_ && abs_vel < vel_compliant_exit_) {
         RCLCPP_INFO(this->get_logger(),
           "Downgrade: TORQUE_LIMIT -> FAULT_MONITOR | tau_raw=%.3f vel=%.3f",
@@ -561,7 +570,7 @@ void StateMachine::evaluate_downgrade(double tau_in, double theta_dot)
     return;
   }
 
-  // ── Da COMPLIANT ─────────────────────────────────────────────────
+  // ── From COMPLIANT ────────────────────────────────────────────────
   if (current_state_ == functional_safety::SafetyState::COMPLIANT_MODE) {
     const bool positive = (abs_tau < tau_compliant_exit_) &&
                           (abs_vel < vel_compliant_exit_);
@@ -604,11 +613,13 @@ void StateMachine::reset_downgrade_counters()
 }
 
 // ════════════════════════════════════════════════════════════════════
-// FIX 2: Bridge liveness check (chiamato da publish_status a 10Hz)
+// Bridge liveness check (called by publish_status at 10 Hz)
 // ════════════════════════════════════════════════════════════════════
 
 int StateMachine::expected_bridge_mode_id() const
 {
+  // Maps state machine state to the bridge mode_id that the bridge should
+  // be reporting when the system is in that state.
   switch (current_state_) {
     case functional_safety::SafetyState::FAULT_MONITOR:     return 0;
     case functional_safety::SafetyState::TORQUE_LIMIT_MODE: return 1;
@@ -620,18 +631,19 @@ int StateMachine::expected_bridge_mode_id() const
 
 void StateMachine::check_bridge_liveness()
 {
-  // Grace period all'avvio
+  // During the grace period, suppress the check unless the bridge has already
+  // been seen (once seen, liveness is always enforced).
   const double uptime = (this->now() - last_transition_time_).seconds();
   if (uptime < bridge_liveness_grace_ && !bridge_ever_seen_) {
     return;
   }
 
-  // Mai visto il bridge dopo il grace period
+  // Grace period elapsed and bridge has never been seen → escalate
   if (!bridge_ever_seen_) {
     RCLCPP_ERROR(this->get_logger(),
       "Bridge NEVER seen after %.1fs grace → SAFE_STOP",
       bridge_liveness_grace_);
-    bridge_ever_seen_ = true;  // evita spam
+    bridge_ever_seen_ = true;  // prevent repeated escalation spam
     bridge_alive_ = false;
     request_state_change(
       functional_safety::SafetyState::SAFE_STOP,
@@ -639,14 +651,14 @@ void StateMachine::check_bridge_liveness()
     return;
   }
 
-  // Verifica età ultimo messaggio
+  // Check age of last message
   const double age =
     (this->now() - last_bridge_status_time_).seconds();
 
   if (age > bridge_liveness_timeout_) {
     bridge_alive_ = false;
 
-    // Già in SAFE_STOP? Non ri-escalare, ma logga una volta
+    // If already in SAFE_STOP, do not re-escalate (avoid repeated transitions)
     if (current_state_ == functional_safety::SafetyState::SAFE_STOP) {
       return;
     }

@@ -1,26 +1,42 @@
 #!/usr/bin/env python3
 """
-exo_bridge.py
-=============
-Gateway di sicurezza fra i controller e il plant.
+Safety gateway between the controllers and the plant.
 
-Modifiche rispetto alla versione precedente:
-  - FIX BUG 5: l'ammittanza viene sbloccata per qualsiasi transizione
-    da 'stop' (non solo verso 'nominal')
-  - FIX BUG 6: lo status pubblica tau_raw (data[8]) per il downgrade
-    nella StateMachine. Il downgrade deve valutare la coppia PRE-clamp
-    per decidere se la condizione di fault è rientrata.
+Role
+----
+The bridge sits between the trajectory controller / admittance controller and
+the dynamics node. Every control cycle it:
+  1. Checks watchdogs on all critical topics.
+  2. Optionally limits or replaces the trajectory reference and torque command
+     according to the current safety mode.
+  3. Publishes the processed commands to the plant.
+  4. Publishes a status vector used by the safety state machine for mode
+     coherence checking and automatic downgrade decisions.
 
-Layout /exo_bridge/status (Float64MultiArray):
-  data[0] = is_stop           (1.0 se modo stop, 0.0 altrimenti)
-  data[1] = is_limited        (1.0 se torque_limit o compliant)
-  data[2] = theta             (posizione rev_crank)
-  data[3] = theta_dot         (velocità rev_crank)
-  data[4] = theta_hold        (posizione di hold in stop, nan se non attivo)
-  data[5] = tau_out           (coppia POST-clamp, effettivamente al plant)
-  data[6] = tau_ext_theta     (forza esterna proiettata)
+Design notes
+------------
+- Freeze logic: when entering STOP mode the bridge publishes freeze=True on
+  /admittance/freeze so the admittance controller holds its virtual state.
+  On any transition OUT of STOP (not just to 'nominal') freeze is released.
+  This prevents the admittance from being left frozen if the state machine
+  later adds a stop→compliant path.
+
+- tau_raw vs tau_out: the status topic publishes tau_raw (pre-clamp torque
+  from the controller) at data[8] in addition to tau_out (post-clamp) at
+  data[5]. The state machine uses tau_raw for the downgrade decision because
+  tau_out is always within limits by construction and would never signal
+  that the fault condition has cleared.
+
+Layout of /exo_bridge/status (Float64MultiArray):
+  data[0] = is_stop           (1.0 if mode==stop, else 0.0)
+  data[1] = is_limited        (1.0 if mode==torque_limit or compliant)
+  data[2] = theta             (rev_crank position)
+  data[3] = theta_dot         (rev_crank velocity)
+  data[4] = theta_hold        (hold position in stop mode, nan if not active)
+  data[5] = tau_out           (post-clamp torque actually sent to plant)
+  data[6] = tau_ext_theta     (projected external force)
   data[7] = mode_id           (0=nominal, 1=torque_limit, 2=compliant, 3=stop)
-  data[8] = tau_raw           (coppia PRE-clamp, grezza dal controller) ← NUOVO
+  data[8] = tau_raw           (pre-clamp torque from the controller)
 """
 import copy
 from typing import Optional
@@ -35,6 +51,7 @@ from sensor_msgs.msg import JointState
 from exoskeletron_safety_msgs.srv import SetMode
 
 
+# Channel names used by the watchdog
 CH_TORQUE  = 'torque_raw'
 CH_TRAJ    = 'trajectory_ref_raw'
 CH_TAU_EXT = 'tau_ext_theta'
@@ -74,7 +91,7 @@ class ExoBridge(Node):
         self.last_torque_in:         Optional[Float64]           = None
         self.last_tau_ext:           Optional[Float64]           = None
 
-        # tau effettivamente inviata al plant nell'ultimo ciclo
+        # Torque actually sent to the plant in the last cycle (post-clamp)
         self.tau_out_last: float = 0.0
 
         self._last_rx: dict[str, Optional[float]] = {
@@ -99,13 +116,13 @@ class ExoBridge(Node):
         self.mode_pub            = self.create_publisher(String,            '/exo_bridge/mode',    10)
         self.admittance_freeze_pub = self.create_publisher(Bool,            '/admittance/freeze',  10)
 
-        # ── Servizi ──────────────────────────────────────────────────
+        # ── Services ──────────────────────────────────────────────────
         self.create_service(SetMode, '/bridge/set_mode', self._cb_set_mode)
 
-        # ── Client verso state machine per safe stop ─────────────────
+        # ── Client to state machine for safe stop escalation ──────────
         self._safe_stop_client = self.create_client(SetBool, '/safe_stop_request')
 
-        # ── Timer principale ─────────────────────────────────────────
+        # ── Main timer ───────────────────────────────────────────────
         self.timer = self.create_timer(1.0 / self.publish_rate_hz, self._control_loop)
 
         self.get_logger().info(
@@ -135,6 +152,7 @@ class ExoBridge(Node):
         self._touch(CH_TAU_EXT)
 
     def _touch(self, channel: str):
+        """Update the last-received timestamp for a channel and clear its dead flag."""
         now = self.get_clock().now().nanoseconds * 1e-9
         self._last_rx[channel] = now
         if channel in self._dead_channels:
@@ -162,17 +180,17 @@ class ExoBridge(Node):
                 f'Bridge mode: STOP | stop_mode={self.stop_mode} | theta_hold='
                 + (f'{theta:.6f}' if theta is not None else 'unavailable')
             )
+            # Freeze the admittance integrator to prevent drift during stop
             freeze_msg = Bool()
             freeze_msg.data = True
             self.admittance_freeze_pub.publish(freeze_msg)
 
-        # FIX BUG 5: sblocca l'ammittanza per qualsiasi transizione
-        # in USCITA da 'stop', non solo verso 'nominal'.
-        # Prima di questo fix, una transizione stop → compliant (se mai
-        # fosse stata aggiunta) avrebbe lasciato l'ammittanza congelata.
         elif prev == 'stop':
+            # Release the admittance freeze on any transition OUT of STOP.
+            # Releasing only on stop→nominal would leave the admittance frozen
+            # for any other exit path added in the future (e.g. stop→compliant).
             self.theta_hold = None
-            self.get_logger().info(f'Bridge mode: {mode.upper()} (was STOP) | unfreeze ammittanza')
+            self.get_logger().info(f'Bridge mode: {mode.upper()} (was STOP) | unfreeze admittance')
             freeze_msg = Bool()
             freeze_msg.data = False
             self.admittance_freeze_pub.publish(freeze_msg)
@@ -205,6 +223,10 @@ class ExoBridge(Node):
     # ── Watchdog ─────────────────────────────────────────────────────
 
     def _check_watchdogs(self):
+        """
+        Monitor all critical channels. After the grace period, if any channel
+        has not been received within watchdog_timeout_sec, trigger a safe stop.
+        """
         now = self.get_clock().now().nanoseconds * 1e-9
         if (now - self._start_time) < self.watchdog_grace:
             return
@@ -301,7 +323,7 @@ class ExoBridge(Node):
             return 0.0
         if self.stop_mode == 'hold_only':
             return self.clamp(tau_in, -self.hold_tau_limit, self.hold_tau_limit)
-        # hold_and_zero_torque o valore non riconosciuto → sicuro
+        # hold_and_zero_torque or unrecognised value → safe default
         return 0.0
 
     def _hold_reference(self) -> Optional[Float64MultiArray]:
@@ -351,11 +373,11 @@ class ExoBridge(Node):
         theta     = self.get_current_theta()
         theta_dot = self.get_current_theta_dot()
 
-        # FIX BUG 6: tau_raw = coppia grezza PRE-clamp dal controller.
-        # Usata dalla StateMachine per il downgrade: deve valutare se
-        # la condizione di fault è rientrata guardando la coppia che il
-        # controller VORREBBE applicare, non quella effettivamente al plant
-        # (che è già clampata e quindi sempre sotto soglia).
+        # tau_raw is the pre-clamp torque from the controller.
+        # The state machine uses it for downgrade decisions: it must evaluate
+        # whether the fault condition has cleared by looking at what the controller
+        # WANTS to apply, not what is actually reaching the plant (which is always
+        # within limits by construction and would never indicate fault recovery).
         tau_raw = self.last_torque_in.data if self.last_torque_in else float('nan')
 
         msg = Float64MultiArray()
@@ -368,7 +390,7 @@ class ExoBridge(Node):
             self.tau_out_last,                                                 # [5] tau_out (post-clamp)
             self.last_tau_ext.data if self.last_tau_ext else float('nan'),    # [6] tau_ext_theta
             self._mode_id(),                                                   # [7] mode_id
-            float(tau_raw),                                                    # [8] tau_raw (pre-clamp) ← NUOVO
+            float(tau_raw),                                                    # [8] tau_raw (pre-clamp)
         ]
         self.bridge_status_pub.publish(msg)
 

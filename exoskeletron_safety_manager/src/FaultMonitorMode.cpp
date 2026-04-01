@@ -18,14 +18,15 @@ void FaultMonitorMode::initialize(const rclcpp::Node::SharedPtr & node)
   message_received_ = false;
   watchdog_triggered_ = false;
 
-  // ---- Dichiara parametri sul nodo host ----
+  // ---- Declare parameters on the host node (declare_if_missing avoids
+  //      duplicate-declaration errors when the plugin is reloaded) ----
   auto declare_if_missing = [&](const std::string & name, double default_val) {
     if (!node_->has_parameter(name)) {
       node_->declare_parameter(name, default_val);
     }
   };
 
-  // Soglie ingresso
+  // Escalation entry thresholds
   declare_if_missing("fault_monitor.tau_compliant_threshold",          2.0);
   declare_if_missing("fault_monitor.tau_torque_limit_threshold",       3.0);
   declare_if_missing("fault_monitor.tau_safe_stop_threshold",          4.0);
@@ -33,32 +34,31 @@ void FaultMonitorMode::initialize(const rclcpp::Node::SharedPtr & node)
   declare_if_missing("fault_monitor.vel_torque_limit_threshold",       2.0);
   declare_if_missing("fault_monitor.vel_safe_stop_threshold",          3.0);
 
-  // Watchdog
+  // Watchdog timeout
   declare_if_missing("fault_monitor.status_timeout_seconds",           0.5);
 
-  // Debounce ingresso
+  // Debounce thresholds (number of consecutive samples above threshold)
   declare_if_missing("fault_monitor.compliant_count_threshold",        3.0);
   declare_if_missing("fault_monitor.torque_count_threshold",           3.0);
   declare_if_missing("fault_monitor.stop_count_threshold",             2.0);
 
-  // Grace period
+  // Grace period after initialization before monitoring starts
   declare_if_missing("fault_monitor.grace_period_seconds",             2.0);
 
   load_thresholds_from_params();
 
-  // ---- Grace period ----
+  // ---- Start grace period ----
   grace_period_active_ = true;
   grace_period_end_ = node_->now() +
     rclcpp::Duration::from_seconds(grace_period_seconds_);
 
-  // FIX BUG 1/2: inizializza il BridgeModeClient e porta il bridge
-  // a "nominal". Questo è il punto in cui il bridge viene allineato
-  // allo stato della state machine. Prima di questo fix, nessun plugin
-  // era responsabile di portare il bridge a "nominal" all'ingresso in
-  // FAULT_MONITOR — si dipendeva dallo shutdown() del plugin uscente
-  // che mandava "nominal", ma questo causava il transitorio di BUG 2
-  // (per le altre transizioni) e il mancato coordinamento di BUG 1
-  // (per il reset da SAFE_STOP).
+  // Set the bridge to 'nominal' when entering FAULT_MONITOR.
+  // This is the single point of responsibility for setting the bridge mode:
+  // - At startup: this call initializes the bridge to nominal.
+  // - After reset from SAFE_STOP: this call restores nominal.
+  // If this initialization were left to the outgoing plugin's shutdown(), it would
+  // create a dangerous race condition: the bridge could briefly be in nominal mode
+  // before the new plugin's initialize() runs.
   init_bridge_client(node);
   request_mode("nominal");
 
@@ -76,7 +76,7 @@ void FaultMonitorMode::initialize(const rclcpp::Node::SharedPtr & node)
     status_timeout_seconds_,
     grace_period_seconds_);
 
-  // ---- Subscriber e clients ----
+  // ---- Subscriber and service clients ----
   bridge_status_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
     "/exo_bridge/status",
     10,
@@ -129,6 +129,7 @@ void FaultMonitorMode::resume()
 void FaultMonitorMode::shutdown()
 {
   if (node_) RCLCPP_INFO(node_->get_logger(), "FaultMonitorMode shutdown");
+  // Release all ROS resources explicitly to avoid dangling callbacks
   bridge_status_sub_.reset();
   watchdog_timer_.reset();
   compliant_client_.reset();
@@ -147,7 +148,7 @@ void FaultMonitorMode::set_safety_params(double param)
 }
 
 // ============================================================
-// Valutazione ingresso (escalation)
+// Escalation evaluation
 // ============================================================
 
 FaultResponseLevel FaultMonitorMode::evaluate_tau_entry(double tau_in) const
@@ -208,6 +209,7 @@ void FaultMonitorMode::bridge_status_callback(
 {
   if (!node_ || msg->data.size() < 9) return;
 
+  // Suppress escalation during the startup grace period
   if (grace_period_active_) {
     if (node_->now() < grace_period_end_) {
       return;
@@ -218,7 +220,7 @@ void FaultMonitorMode::bridge_status_callback(
     stop_counter_ = 0;
     last_requested_level_ = FaultResponseLevel::NOMINAL;
     RCLCPP_INFO(node_->get_logger(),
-      "FaultMonitorMode: grace period terminato, monitoraggio attivo");
+      "FaultMonitorMode: grace period ended, monitoring active");
   }
 
   message_received_ = true;
@@ -226,10 +228,10 @@ void FaultMonitorMode::bridge_status_callback(
   last_msg_time_ = node_->now();
 
   const double theta_dot = msg->data[3];
-  // L'escalation usa tau_out (data[5]): la coppia effettivamente al plant.
-  // Questo è corretto perché il FaultMonitorMode valuta se il plant sta
-  // subendo una coppia pericolosa, non quale coppia il controller vorrebbe
-  // applicare.
+  // Escalation uses tau_out (data[5]): torque actually applied to the plant.
+  // This is correct because FaultMonitorMode evaluates whether the plant is
+  // experiencing a dangerous torque, not what the controller wants to apply.
+  // tau_raw (data[8]) is used only by StateMachine for downgrade decisions.
   const double tau_in    = msg->data[5];
 
   const auto tau_level     = evaluate_tau_entry(tau_in);
@@ -239,6 +241,7 @@ void FaultMonitorMode::bridge_status_callback(
   update_debounce_counters(instantaneous);
   const auto entry_level = debounced_entry_level();
 
+  // Escalation is monotone: do not re-request a level already requested
   if (!is_more_severe(entry_level, last_requested_level_)) {
     return;
   }
@@ -298,7 +301,7 @@ void FaultMonitorMode::watchdog_callback()
 }
 
 // ============================================================
-// Chiamate servizio
+// Service calls
 // ============================================================
 
 bool FaultMonitorMode::call_bool_service(
@@ -308,13 +311,13 @@ bool FaultMonitorMode::call_bool_service(
 {
   if (!node_ || !client) {
     RCLCPP_ERROR(rclcpp::get_logger("FaultMonitorMode"),
-      "call_bool_service: client null per %s", service_name.c_str());
+      "call_bool_service: null client for %s", service_name.c_str());
     return false;
   }
 
   if (!client->wait_for_service(std::chrono::milliseconds(200))) {
     RCLCPP_ERROR(node_->get_logger(),
-      "FaultMonitorMode: servizio %s non disponibile", service_name.c_str());
+      "FaultMonitorMode: service %s not available", service_name.c_str());
     return false;
   }
 
@@ -333,7 +336,7 @@ bool FaultMonitorMode::call_bool_service(
       }
     } catch (const std::exception & e) {
       RCLCPP_ERROR(node_->get_logger(),
-        "FaultMonitorMode: eccezione risposta %s: %s",
+        "FaultMonitorMode: exception in response to %s: %s",
         service_name.c_str(), e.what());
     }
   };

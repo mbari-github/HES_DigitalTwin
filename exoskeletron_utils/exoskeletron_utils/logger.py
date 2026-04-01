@@ -1,30 +1,28 @@
 #!/usr/bin/env python3
 """
-logger_node.py
-==============
+ROS2 CSV logger for the exoskeleton digital twin.
 
-Logger ROS2 per il digital twin dell'esoscheletro.
+Function:
+- Subscribes to the main diagnostic topics from the plant and controllers.
+- Accumulates the latest value received for each block.
+- Periodically writes a CSV row with a local timestamp and all fields.
 
-Funzione:
-- sottoscrive i topic diagnostici principali del plant e dei controllori
-- accumula l'ultimo valore ricevuto per ciascun blocco
-- scrive periodicamente una riga CSV con timestamp locale e tutti i campi
-
-Topic sottoscritti:
+Subscribed topics:
   /exo_dynamics/debug         std_msgs/Float64MultiArray
   /exo_dynamics/ff_terms      std_msgs/Float64MultiArray
-  /exo_dynamics/model_debug   std_msgs/Float64MultiArray   (se presente)
+  /exo_dynamics/model_debug   std_msgs/Float64MultiArray   (optional)
   /traj_ctrl/debug            std_msgs/Float64MultiArray
   /admittance/debug           std_msgs/Float64MultiArray
-  /joint_states               sensor_msgs/JointState       (opzionale, ridondanza)
-  /torque                     std_msgs/Float64             (opzionale, ridondanza)
+  /joint_states               sensor_msgs/JointState       (optional, redundancy)
+  /torque                     std_msgs/Float64             (optional, redundancy)
 
 Output:
-  CSV con colonne stabili e flush periodico su disco.
+  CSV file with stable columns and periodic flush to disk.
 
-Note:
-- Se un topic non è ancora arrivato, i campi corrispondenti vengono scritti come NaN.
-- /exo_dynamics/model_debug è opzionale: se il topic non esiste, le colonne restano NaN.
+Notes:
+- If a topic has not been received yet, the corresponding fields are written as NaN.
+- /exo_dynamics/model_debug is optional: if the topic does not exist, its columns
+  remain NaN.
 """
 
 from pathlib import Path
@@ -61,7 +59,7 @@ CSV_COLUMNS = [
     "tau_pass_theta",
     "reaction_theta",
 
-    # ---------------- ff terms ----------------
+    # ---------------- feed-forward terms ----------------
     "ff_M_eff",
     "ff_proj",
     "ff_g_proj",
@@ -112,7 +110,7 @@ CSV_COLUMNS = [
     "adm_D",
     "adm_K",
 
-    # ---------------- opzionali / ridondanza ----------------
+    # ---------------- optional / redundancy ----------------
     "js_theta",
     "js_theta_dot",
     "tau_cmd",
@@ -129,7 +127,7 @@ class ExoLogger(Node):
         super().__init__("exo_logger")
 
         # ------------------------------------------------
-        # Parametri
+        # Parameters
         # ------------------------------------------------
         self.declare_parameter("output_dir", str(Path.home() / "exo_logs"))
         self.declare_parameter("file_name", "exo_log.csv")
@@ -148,6 +146,7 @@ class ExoLogger(Node):
         output_dir.mkdir(parents=True, exist_ok=True)
         self.csv_path = output_dir / file_name
 
+        # If overwrite is False, append a numeric suffix to avoid clobbering an existing file
         if self.csv_path.exists() and not overwrite:
             stem = self.csv_path.stem
             suffix = self.csv_path.suffix
@@ -160,11 +159,12 @@ class ExoLogger(Node):
                 k += 1
 
         # ------------------------------------------------
-        # Stato interno
+        # Internal state
         # ------------------------------------------------
         self.t0 = self.get_clock().now().nanoseconds * 1e-9
         self.rows_written = 0
 
+        # Latest data block received from each topic (None until first message)
         self.last: Dict[str, Optional[Dict[str, float]]] = {
             "exo_debug": None,
             "ff_terms": None,
@@ -176,7 +176,7 @@ class ExoLogger(Node):
         }
 
         # ------------------------------------------------
-        # CSV
+        # CSV file setup
         # ------------------------------------------------
         self.csv_file = open(self.csv_path, "w", newline="")
         self.writer = csv.DictWriter(self.csv_file, fieldnames=CSV_COLUMNS)
@@ -236,13 +236,13 @@ class ExoLogger(Node):
         )
 
         # ------------------------------------------------
-        # Timer di scrittura
+        # Write timer
         # ------------------------------------------------
         dt = 1.0 / max(self.log_rate, 1e-6)
         self.timer = self.create_timer(dt, self.write_row)
 
         self.get_logger().info(
-            f"ExoLogger avviato | csv={self.csv_path} | log_rate={self.log_rate:.1f} Hz"
+            f"ExoLogger started | csv={self.csv_path} | log_rate={self.log_rate:.1f} Hz"
         )
 
     # ====================================================
@@ -251,7 +251,7 @@ class ExoLogger(Node):
 
     def exo_debug_cb(self, msg: Float64MultiArray) -> None:
         """
-        Layout /exo_dynamics/debug:
+        Layout of /exo_dynamics/debug:
           [0]  theta
           [1]  theta_dot
           [2]  theta_ddot
@@ -289,7 +289,7 @@ class ExoLogger(Node):
 
     def ff_terms_cb(self, msg: Float64MultiArray) -> None:
         """
-        Layout /exo_dynamics/ff_terms:
+        Layout of /exo_dynamics/ff_terms:
           [0] M_eff
           [1] proj
           [2] g_proj
@@ -305,7 +305,7 @@ class ExoLogger(Node):
 
     def model_debug_cb(self, msg: Float64MultiArray) -> None:
         """
-        Layout /exo_dynamics/model_debug:
+        Layout of /exo_dynamics/model_debug:
           [0]  theta
           [1]  theta_dot
           [2]  theta_ddot
@@ -343,7 +343,7 @@ class ExoLogger(Node):
 
     def traj_debug_cb(self, msg: Float64MultiArray) -> None:
         """
-        Layout /traj_ctrl/debug:
+        Layout of /traj_ctrl/debug:
           [0] theta_ref
           [1] theta
           [2] e_theta
@@ -377,7 +377,7 @@ class ExoLogger(Node):
 
     def adm_debug_cb(self, msg: Float64MultiArray) -> None:
         """
-        Layout /admittance/debug:
+        Layout of /admittance/debug:
           [0]  theta_v
           [1]  theta_dot_v
           [2]  theta_ddot_v
@@ -425,7 +425,7 @@ class ExoLogger(Node):
         }
 
     # ====================================================
-    # SCRITTURA CSV
+    # CSV WRITE
     # ====================================================
 
     def write_row(self) -> None:
@@ -440,6 +440,7 @@ class ExoLogger(Node):
         self.writer.writerow(row)
         self.rows_written += 1
 
+        # Periodic flush to disk to avoid data loss on crash
         if self.rows_written % max(self.flush_every_n_rows, 1) == 0:
             self.csv_file.flush()
             os.fsync(self.csv_file.fileno())
@@ -455,7 +456,7 @@ class ExoLogger(Node):
             self.csv_file.close()
         except Exception:
             pass
-        self.get_logger().info(f"CSV salvato in: {self.csv_path}")
+        self.get_logger().info(f"CSV saved to: {self.csv_path}")
         return super().destroy_node()
 
 

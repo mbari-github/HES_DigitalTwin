@@ -1,31 +1,28 @@
 #!/usr/bin/env python3
 """
-dynamics_control_test.py
-=========================
-Nodo ROS 2 di dinamica ridotta dell'esoscheletro — versione semplificata
-per il test e la validazione degli anelli di controllo.
+Reduced-dynamics ROS2 node — simplified version for control-loop testing.
 
-Rispetto a new_dynamics_with_hand.py, questa versione:
-  - rimuove la wrench esterna cartesiana (niente WrenchStamped, Jacobiano al
-    contact frame, Marker, CE force estimation)
-  - accetta direttamente un override scalare su tau_ext_theta via Float64
-    sul topic /exo_dynamics/tau_ext_theta_override
-  - rimuove il topic /exo_dynamics/model_debug (diagnostica estesa)
+Compared to new_dynamics_with_hand.py, this version:
+  - Removes the Cartesian external wrench (no WrenchStamped, contact-frame
+    Jacobian, Marker, or CE force estimation).
+  - Accepts a scalar override of tau_ext_theta via Float64 on
+    /exo_dynamics/tau_ext_theta_override instead of computing it from a wrench.
+  - Removes the /exo_dynamics/model_debug topic (extended diagnostics).
 
-Tutto il core è identico: chiusura cinematica, riduzione B, CRBA/RNEA,
-coppie passive Fung, attrito, integrazione Euler, ff_terms.
+The core is identical: kinematic closure, B-vector reduction, CRBA/RNEA,
+Fung passive torques, friction, Euler integration, and ff_terms.
 
-Equazione ridotta:
+Reduced equation of motion:
     M_eff * theta_ddot =
         tau_m + tau_pass_theta + tau_ext_theta - proj - tau_fric - tau_damp
 
-Topics pubblicati:
+Published topics:
     /joint_states                   sensor_msgs/JointState
     /exo_dynamics/debug             std_msgs/Float64MultiArray
     /exo_dynamics/ff_terms          std_msgs/Float64MultiArray
     /exo_dynamics/tau_ext_theta     std_msgs/Float64
 
-Topics sottoscritti:
+Subscribed topics:
     /torque                                 std_msgs/Float64
     /exo_dynamics/tau_ext_theta_override    std_msgs/Float64
 """
@@ -50,7 +47,7 @@ class ExoDynamicsControlTest(Node):
         super().__init__('exo_dynamics_control_test')
 
         # ============================================================
-        # PARAMETRI ROS 2
+        # ROS 2 PARAMETERS
         # ============================================================
 
         self.declare_parameter(
@@ -86,7 +83,7 @@ class ExoDynamicsControlTest(Node):
         self.declare_parameter('limit_backoff_tries', 6)
         self.declare_parameter('limit_use_theta_bounds', True)
 
-        # --- Modello passivo falangi ---
+        # ── Passive finger model (Fung exponential stiffness) ──
         self.declare_parameter('passive_enable', True)
         self.declare_parameter('K0_MCF', 0.03)
         self.declare_parameter('alpha_MCF', 4.0)
@@ -99,14 +96,14 @@ class ExoDynamicsControlTest(Node):
         self.declare_parameter('passive_K_MAX', 5.0)
         self.declare_parameter('passive_exp_clip', 12.0)
 
-        # --- Soft bound su giunto mediale ---
+        # ── Soft bound on the medial finger joint ──
         self.declare_parameter('medial_soft_enable', True)
         self.declare_parameter('medial_soft_lower', -2.2)
         self.declare_parameter('medial_soft_upper', 0.0)
         self.declare_parameter('medial_soft_weight', 1.0)
 
         # ============================================================
-        # MODELLO PINOCCHIO
+        # PINOCCHIO MODEL
         # ============================================================
 
         self.urdf_path = str(self.get_parameter('urdf_path').value)
@@ -124,25 +121,25 @@ class ExoDynamicsControlTest(Node):
 
         if bool(self.get_parameter('gravity_zero').value):
             self.model.gravity.linear = np.array([0.0, 0.0, 0.0])
-            self.get_logger().warn("gravity_zero=True: gravità disattivata.")
+            self.get_logger().warn("gravity_zero=True: gravity disabled.")
 
-        # --- Giunto attivo ---
+        # ── Active joint (theta = rev_crank) ──
         self.jid_crank = self.model.getJointId('rev_crank')
         if self.jid_crank <= 0:
-            raise RuntimeError("Joint 'rev_crank' non trovato in URDF.")
+            raise RuntimeError("Joint 'rev_crank' not found in URDF.")
         self.idx_theta = self.jid_crank - 1
 
-        # --- Giunti falangi ---
+        # ── Finger joints (passive spring-damper model) ──
         self.jid_MCF = self.model.getJointId('rev_palmo2prossimale')
         self.jid_IFP = self.model.getJointId('rev_prossimale2mediale')
         if self.jid_MCF <= 0 or self.jid_IFP <= 0:
             raise RuntimeError(
-                "Joint mano (rev_palmo2prossimale / rev_prossimale2mediale) "
-                "non trovato."
+                "Hand joints (rev_palmo2prossimale / rev_prossimale2mediale) "
+                "not found in URDF."
             )
 
         # ============================================================
-        # FRAME PAIRS PER LA CHIUSURA CINEMATICA
+        # KINEMATIC CLOSURE FRAME PAIRS
         # ============================================================
 
         self.closure_frame_name_pairs = [
@@ -158,13 +155,13 @@ class ExoDynamicsControlTest(Node):
             idb = self.model.getFrameId(b)
             if ida < 0 or idb < 0:
                 self.get_logger().warning(
-                    f"Coppia frame non trovata: {a}, {b}"
+                    f"Closure frame pair not found: {a}, {b}"
                 )
             else:
                 self.closure_frame_pairs.append((ida, idb))
 
         # ============================================================
-        # DOF DIPENDENTI
+        # DEPENDENT DOFs (solved by the kinematic closure solver)
         # ============================================================
 
         dep_joint_names = [
@@ -182,7 +179,7 @@ class ExoDynamicsControlTest(Node):
 
         if any(i < 0 for i in self.idx_opt):
             raise RuntimeError(
-                "Uno o più joint del subset cinematico non trovati."
+                "One or more joints in the kinematic subset not found in URDF."
             )
 
         self.lower = np.array(
@@ -193,7 +190,7 @@ class ExoDynamicsControlTest(Node):
         )
 
         # ============================================================
-        # STATO RIDOTTO
+        # REDUCED STATE
         # ============================================================
 
         self.theta = float(self.get_parameter('theta_init').value)
@@ -210,17 +207,17 @@ class ExoDynamicsControlTest(Node):
 
         self.tau_m = 0.0
 
-        # --- Override diretto di tau_ext_theta ---
+        # ── Direct override of tau_ext_theta ──
         self.tau_ext = np.zeros(self.nv)
         self.tau_ext_theta = 0.0
         self._tau_ext_override_value = 0.0
 
-        # --- Passivi ---
+        # ── Passive torques ──
         self.passive_enable = bool(self.get_parameter('passive_enable').value)
         self.tau_pass = np.zeros(self.nv)
         self.tau_pass_theta = 0.0
 
-        # --- Diagnostica ---
+        # ── Diagnostics ──
         self.step_count = 0
         self.last_solver_success = False
         self.last_solver_nfev = 0
@@ -236,7 +233,7 @@ class ExoDynamicsControlTest(Node):
         self.tau_damp_last = 0.0
         self.num_last = 0.0
 
-        # --- Finecorsa ---
+        # ── Joint limit state ──
         self.at_limit = False
         self.limit_dir = 0.0
         self.have_valid = False
@@ -272,7 +269,7 @@ class ExoDynamicsControlTest(Node):
         )
 
         # ============================================================
-        # INIZIALIZZAZIONE CHIUSURA
+        # INITIAL KINEMATIC CLOSURE
         # ============================================================
 
         q0, _ = self.solve_closure(self.theta, update_warmstart=True)
@@ -282,7 +279,7 @@ class ExoDynamicsControlTest(Node):
             self._store_valid_state()
         else:
             self.get_logger().warning(
-                "solve_closure iniziale fallita: AT_LIMIT."
+                "Initial solve_closure failed: starting in AT_LIMIT."
             )
             self.at_limit = True
             self.theta_dot = 0.0
@@ -292,7 +289,7 @@ class ExoDynamicsControlTest(Node):
         self.pub_timer = self.create_timer(self.publish_dt, self.publish)
 
         self.get_logger().info(
-            f"ExoDynamicsControlTest avviato | URDF={self.urdf_path} | "
+            f"ExoDynamicsControlTest started | URDF={self.urdf_path} | "
             f"passive_enable={self.passive_enable} | "
             f"tau_ext_theta override ENABLED"
         )
@@ -320,7 +317,7 @@ class ExoDynamicsControlTest(Node):
         self.last_x_valid = self.last_x.copy()
 
     # ============================================================
-    # CHIUSURA CINEMATICA
+    # KINEMATIC CLOSURE
     # ============================================================
 
     def closure_error(self, q: np.ndarray) -> np.ndarray:
@@ -410,7 +407,7 @@ class ExoDynamicsControlTest(Node):
         return q_sol, info
 
     # ============================================================
-    # PROIEZIONE B = dq/dtheta
+    # PROJECTION VECTOR B = dq/dtheta
     # ============================================================
 
     def compute_B(self, q: np.ndarray) -> np.ndarray:
@@ -446,7 +443,7 @@ class ExoDynamicsControlTest(Node):
         return e_theta + x
 
     # ============================================================
-    # TAU_EXT (override diretto)
+    # EXTERNAL TORQUE (direct scalar override)
     # ============================================================
 
     def compute_tau_ext(self) -> None:
@@ -454,7 +451,7 @@ class ExoDynamicsControlTest(Node):
         self.tau_ext_theta = self._tau_ext_override_value
 
     # ============================================================
-    # TORQUES PASSIVI
+    # PASSIVE TORQUES (Fung exponential spring-damper on finger joints)
     # ============================================================
 
     def compute_passive_torques(
@@ -506,7 +503,7 @@ class ExoDynamicsControlTest(Node):
         self.tau_pass_theta = float(self.B.T @ self.tau_pass)
 
     # ============================================================
-    # FINECORSA
+    # JOINT LIMITS
     # ============================================================
 
     def _clamp_theta_bounds(self, theta: float) -> float:
@@ -568,24 +565,24 @@ class ExoDynamicsControlTest(Node):
         return False
 
     # ============================================================
-    # STEP DINAMICO
+    # DYNAMICS STEP
     # ============================================================
 
     def step(self) -> None:
         self.step_count += 1
         logN = max(1, int(self.get_parameter('log_every_n_steps').value))
 
-        # 0) Se in AT_LIMIT, prova release
+        # 0) If stuck at limit, attempt release
         if self.at_limit:
             if not self._stuck_try_release():
                 self.dq[:] = 0.0
                 self.ddq[:] = 0.0
                 return
 
-        # 1) Clamp theta
+        # 1) Clamp theta within configured bounds
         self.theta = self._clamp_theta_bounds(self.theta)
 
-        # 2) Chiusura cinematica
+        # 2) Kinematic closure for current theta
         q_new, info = self.solve_closure(self.theta, update_warmstart=True)
         self.last_solver_success = bool(info['success'])
         self.last_solver_nfev = int(info['nfev'])
@@ -608,12 +605,12 @@ class ExoDynamicsControlTest(Node):
             self.ddq[:] = 0.0
             if self.step_count % logN == 0:
                 self.get_logger().warning(
-                    f"[step {self.step_count}] solve_closure fallita "
+                    f"[step {self.step_count}] solve_closure failed "
                     f"-> AT_LIMIT"
                 )
             return
 
-        # 3) Aggiorna cinematica e B
+        # 3) Update kinematics and projection vector B
         self.q = q_new
         self.B_prev = self.B.copy()
         self.B = self.compute_B(self.q)
@@ -622,19 +619,19 @@ class ExoDynamicsControlTest(Node):
 
         Bdot = (self.B - self.B_prev) / self.dt
 
-        # 4) dq, ddq preliminari
+        # 4) Preliminary dq, ddq (updated again at step 12 after integration)
         self.dq = self.B * self.theta_dot
         self.ddq = self.B * self.theta_ddot + Bdot * self.theta_dot
 
-        # 5) Dinamica completa
+        # 5) Full dynamics: mass matrix and nonlinear effects
         M = pin.crba(self.model, self.data, self.q)
         h = pin.nonLinearEffects(self.model, self.data, self.q, self.dq)
 
-        # 6) Ingressi esterni e passivi
+        # 6) External inputs (tau_ext override) and passive torques
         self.compute_tau_ext()
         self.compute_passive_torques(self.q, self.dq)
 
-        # 7) Scalari ridotti
+        # 7) Reduced scalar quantities (effective inertia, gravity+centrifugal projection)
         denom_mech = float(self.B.T @ (M @ self.B))
         Jm = float(self.get_parameter('motor_inertia').value)
         denom = denom_mech + Jm
@@ -662,7 +659,7 @@ class ExoDynamicsControlTest(Node):
             self.ddq[:] = 0.0
             return
 
-        # 8) Attrito + damping
+        # 8) Friction and additional damping on theta
         b = float(self.get_parameter('fric_visc').value)
         fc = float(self.get_parameter('fric_coul').value)
         eps = float(self.get_parameter('fric_eps').value)
@@ -674,7 +671,7 @@ class ExoDynamicsControlTest(Node):
         damping_theta = float(self.get_parameter('damping_theta').value)
         tau_damp = damping_theta * self.theta_dot
 
-        # 9) Equazione del moto scalare
+        # 9) Scalar equation of motion
         num = (
             self.tau_m
             + self.tau_pass_theta
@@ -685,12 +682,12 @@ class ExoDynamicsControlTest(Node):
         max_dd = float(self.get_parameter('max_theta_ddot').value)
         self.theta_ddot = float(np.clip(self.theta_ddot, -max_dd, max_dd))
 
-        # 10) Diagnostica
+        # 10) Save diagnostic scalars for publishing
         self.tau_fric_last = float(tau_fric)
         self.tau_damp_last = float(tau_damp)
         self.num_last = float(num)
 
-        # 11) Integrazione Eulero esplicito
+        # 11) Explicit Euler integration
         self.theta_dot += self.theta_ddot * self.dt
         max_d = float(self.get_parameter('max_theta_dot').value)
         self.theta_dot = float(np.clip(self.theta_dot, -max_d, max_d))
@@ -714,17 +711,17 @@ class ExoDynamicsControlTest(Node):
 
         self.theta = float(theta_next)
 
-        # 12) dq, ddq finali
+        # 12) Final dq, ddq after integration
         self.dq = self.B * self.theta_dot
         self.ddq = self.B * self.theta_ddot + Bdot * self.theta_dot
 
-        # 13) Tau full da RNEA
+        # 13) Full joint torques via RNEA (used in /joint_states effort field)
         tau_rnea = pin.rnea(
             self.model, self.data, self.q, self.dq, self.ddq
         )
         self.tau_full = (tau_rnea - self.tau_ext - self.tau_pass).copy()
 
-        # 14) Reazione equivalente su theta
+        # 14) Equivalent reaction torque on theta (diagnostic only)
         self.reaction_theta_last = float(
             self.proj_last + tau_fric + tau_damp
             - (self.tau_m + self.tau_pass_theta + self.tau_ext_theta)

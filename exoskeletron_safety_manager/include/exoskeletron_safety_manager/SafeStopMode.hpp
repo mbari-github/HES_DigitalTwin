@@ -6,6 +6,22 @@
 
 namespace functional_safety
 {
+
+/**
+ * SafeStopMode — safety plugin that sets the bridge to 'stop' mode.
+ *
+ * In stop mode the bridge drives the torque to zero and holds the joint
+ * at its current position. This state is latched: the system can only exit
+ * it via an explicit /reset_safety_request service call.
+ *
+ * Bridge mode lifecycle:
+ * - initialize(): requests bridge → 'stop'
+ * - stop() / resume(): re-asserts 'stop' in case the bridge drifted
+ * - shutdown(): does NOT send any mode request.
+ *               The incoming plugin sets the bridge mode in its own initialize().
+ *               Sending 'nominal' here would create a dangerous window where
+ *               the bridge has no torque limit while the next plugin initializes.
+ */
 class SafeStopMode : public SafetyTools, protected BridgeModeClient
 {
 public:
@@ -22,12 +38,6 @@ public:
   void pause()    override {}
   void resume()   override { request_mode("stop"); }
 
-  // FIX BUG 2: shutdown() non manda più request_mode("nominal").
-  // La responsabilità di impostare il bridge mode corretto è del
-  // plugin ENTRANTE nel suo initialize(), non di quello USCENTE.
-  // Il vecchio comportamento causava un transitorio pericoloso:
-  // shutdown("nominal") → initialize("stop") con il bridge
-  // brevemente in "nominal" senza protezione.
   void shutdown() override
   {
     if (node_) {
@@ -37,5 +47,5 @@ public:
 
   void set_safety_params(double) override {}
 };
-}
+}  // namespace functional_safety
 #endif

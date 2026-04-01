@@ -9,22 +9,23 @@
 namespace functional_safety
 {
 
-// ════════════════════════════════════════════════════════════════════
-// BridgeModeClient — callback asincrono di verifica
-// ════════════════════════════════════════════════════════════════════
-//
-// Rispetto alla versione originale ((void)future):
-//   - request_mode() registra un response_callback che logga se il
-//     bridge ha accettato o rifiutato il cambio modo
-//   - last_confirmed_mode_ traccia l'ultimo modo confermato
-//   - Se il servizio non è disponibile, logga ERROR e ritorna
-//     (l'escalation a SAFE_STOP è responsabilità della SM via
-//     check_bridge_liveness, NON del BridgeModeClient — altrimenti
-//     si crea un loop infinito quando il bridge è morto)
-//
-// Compatibilità: nessun spin_until_future_complete, nessun secondo
-// client di servizio, funziona con il single-threaded executor.
-
+/**
+ * BridgeModeClient — mixin that gives a plugin the ability to request a
+ * bridge mode change via the /bridge/set_mode service.
+ *
+ * Usage: inherit from this class (protected) and call init_bridge_client()
+ * in initialize(), then call request_mode("nominal"|"compliant"|...) as needed.
+ *
+ * Design notes:
+ * - request_mode() is fully asynchronous (async_send_request + callback).
+ *   It does NOT block the calling thread and works with a single-threaded executor.
+ * - If the service is not available within 500 ms, a warning is logged and the
+ *   request is silently dropped. Escalation to SAFE_STOP in case of a dead bridge
+ *   is the responsibility of StateMachine::check_bridge_liveness(), NOT of this
+ *   class — doing it here would create an infinite loop when the bridge is dead.
+ * - last_confirmed_mode_ tracks the last mode that was positively acknowledged
+ *   by the bridge, which can be used for diagnostics.
+ */
 class BridgeModeClient
 {
 protected:
@@ -43,8 +44,8 @@ protected:
       RCLCPP_WARN(node_->get_logger(),
         "BridgeModeClient: /bridge/set_mode not available "
         "(requested mode='%s')", mode.c_str());
-      // NON escalare qui — la SM rileverà la morte del bridge
-      // via check_bridge_liveness() e gestirà il SAFE_STOP.
+      // Do NOT escalate here — the state machine will detect the dead bridge
+      // via check_bridge_liveness() and handle the SAFE_STOP transition.
       return;
     }
 

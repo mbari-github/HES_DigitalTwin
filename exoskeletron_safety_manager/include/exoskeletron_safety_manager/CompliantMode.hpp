@@ -6,6 +6,24 @@
 
 namespace functional_safety
 {
+
+/**
+ * CompliantMode — safety plugin that sets the bridge to 'compliant' mode.
+ *
+ * In compliant mode the bridge applies reduced torque, velocity, and
+ * acceleration limits (configured in the bridge parameters). This is
+ * used when a soft fault has been detected but the system can continue
+ * operating under tighter constraints.
+ *
+ * Bridge mode lifecycle:
+ * - initialize(): requests bridge → 'compliant'
+ * - stop() / resume(): re-asserts 'compliant' in case the bridge drifted
+ * - shutdown(): does NOT send any mode request.
+ *               Setting the bridge mode at shutdown would create a dangerous
+ *               transient: the bridge could briefly be in the wrong mode before
+ *               the incoming plugin sets the correct one. Mode responsibility
+ *               always belongs to the INCOMING plugin's initialize().
+ */
 class CompliantMode : public SafetyTools, protected BridgeModeClient
 {
 public:
@@ -22,7 +40,6 @@ public:
   void pause()    override {}
   void resume()   override { request_mode("compliant"); }
 
-  // FIX BUG 2: shutdown() non manda più request_mode("nominal").
   void shutdown() override
   {
     if (node_) {
@@ -32,5 +49,5 @@ public:
 
   void set_safety_params(double) override {}
 };
-}
+}  // namespace functional_safety
 #endif
