@@ -25,7 +25,9 @@ setup(
     entry_points={
     'console_scripts': [
         'logger = exoskeletron_utils.logger:main',
-        'gui_input = exoskeletron_utils.gui_input_node:main',
+        'gui_input = exoskeletron_utils.GUI:main',
+        'gui_input_control = exoskeletron_utils.GUI_control:main',
+
         'external_wrench_sine = exoskeletron_utils.external_wrench_sine:main',
         'external_wrench_step = exoskeletron_utils.external_wrench_step:main',
         'external_wrench_pub = exoskeletron_utils.external_wrench_pub:main',    ],

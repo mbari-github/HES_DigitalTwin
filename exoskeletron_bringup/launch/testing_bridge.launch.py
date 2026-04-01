@@ -33,9 +33,9 @@ def generate_launch_description():
     #   2 -> /torque
     #   3 -> /joint_states
 
-    FAULT_CHANNEL   = 0
+    FAULT_CHANNEL   = 3
     FAULT_TYPE      = 'offset'
-    FAULT_MAGNITUDE = -0.5
+    FAULT_MAGNITUDE = 0.1
     FAULT_ACTIVE    = False
     NOISE_STD       = 0.1
     SPIKE_DURATION  = 0.05

@@ -27,7 +27,7 @@ def generate_launch_description():
         # ── Dinamica dell'esoscheletro ────────────────────────────
         Node(
             package='exoskeletron_dynamics',
-            executable='dynamics_stripped',
+            executable='exo_dynamics',
             name='dynamics',
             output='screen',
         ),
@@ -43,7 +43,7 @@ def generate_launch_description():
 
         Node(
             package='exoskeletron_utils',
-            executable='external_wrench_step',
+            executable='gui_input_control',
             name='input',
             output='screen',
         ),

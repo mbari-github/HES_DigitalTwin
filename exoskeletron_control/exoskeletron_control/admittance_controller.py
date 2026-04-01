@@ -46,6 +46,20 @@ Topics
   Pub:  /trajectory_ref               std_msgs/Float64MultiArray  [θ_ref, θ̇_ref, θ̈_ref]
         /admittance/debug             std_msgs/Float64MultiArray
 
+Barriera virtuale (virtual wall)
+---------------------------------
+Quando theta_v entra nella fascia di ampiezza wall_buffer prima di un limite
+meccanico, una molla-smorzatore virtuale respinge la traiettoria verso l'interno.
+Questo garantisce che velocità e accelerazione restino fisicamente coerenti con
+la posizione, evitando che il trajectory controller spinga il motore contro il
+finecorsa. Il clamp rigido è mantenuto come safety net di ultima istanza; se
+interviene, velocità e accelerazione vengono azzerate.
+
+    tau_wall = -K_wall * penetrazione - D_wall * vel_verso_il_muro
+
+La forza tau_wall entra nel bilancio del modello virtuale insieme a tau_in,
+tau_spring e tau_damper.
+
 Parametri ROS2
 --------------
   joint_name     (str,   default 'rev_crank')
@@ -54,9 +68,12 @@ Parametri ROS2
   K_virt         (float, default 2.0)
   theta_eq       (float, default 0.0)
   force_deadband (float, default 0.1)
-  theta_ref_min  (float, default -2.0)
-  theta_ref_max  (float, default  2.0)
+  theta_ref_min  (float, default -0.75)   limite inferiore traiettoria [rad]
+  theta_ref_max  (float, default  0.09)   limite superiore traiettoria [rad]
   theta_dot_max  (float, default  5.0)
+  wall_buffer    (float, default  0.05)   ampiezza zona barriera [rad]
+  K_wall         (float, default 80.0)    rigidezza barriera [Nm/rad]
+  D_wall         (float, default 10.0)    smorzamento barriera [Nm·s/rad]
   publish_rate   (float, default 200.0)
   init_from_js   (bool,  default True)
 """
@@ -80,9 +97,12 @@ class AdmittanceController(Node):
         self.declare_parameter('K_virt',          2.0)
         self.declare_parameter('theta_eq',        0.0)
         self.declare_parameter('force_deadband',  0.0)
-        self.declare_parameter('theta_ref_min',  -2.0)
-        self.declare_parameter('theta_ref_max',   2.0)
+        self.declare_parameter('theta_ref_min',  -0.75)
+        self.declare_parameter('theta_ref_max',   0.09)
         self.declare_parameter('theta_dot_max',   5.0)
+        self.declare_parameter('wall_buffer',      0.05)
+        self.declare_parameter('K_wall',          80.0)
+        self.declare_parameter('D_wall',          10.0)
         self.declare_parameter('publish_rate',  200.0)
         self.declare_parameter('init_from_js',   True)
 
@@ -238,11 +258,35 @@ class AdmittanceController(Node):
         th_min   = float(self.get_parameter('theta_ref_min').value)
         th_max   = float(self.get_parameter('theta_ref_max').value)
         dv_max   = float(self.get_parameter('theta_dot_max').value)
+        w_buf    = float(self.get_parameter('wall_buffer').value)
+        K_w      = float(self.get_parameter('K_wall').value)
+        D_w      = float(self.get_parameter('D_wall').value)
 
         tau_in = self.tau_ext_theta
         if abs(tau_in) < db:
             tau_in = 0.0
 
+        # ── Barriera virtuale (virtual wall) ──────────────────────
+        # Forza repulsiva molla+smorzatore quando theta_v entra nella
+        # fascia di ampiezza w_buf prima dei limiti meccanici.
+        # Lo smorzatore agisce solo sulla componente di velocità
+        # diretta verso il muro (unilaterale), per non frenare il
+        # ritorno spontaneo verso l'interno.
+        tau_wall = 0.0
+        upper_threshold = th_max - w_buf
+        lower_threshold = th_min + w_buf
+
+        if self.theta_v > upper_threshold:
+            penetration = self.theta_v - upper_threshold
+            vel_into_wall = max(self.theta_dot_v, 0.0)
+            tau_wall = -K_w * penetration - D_w * vel_into_wall
+
+        elif self.theta_v < lower_threshold:
+            penetration = lower_threshold - self.theta_v
+            vel_into_wall = max(-self.theta_dot_v, 0.0)
+            tau_wall = K_w * penetration + D_w * vel_into_wall
+
+        # ── Dinamica virtuale M-D-K con barriera ─────────────────
         tau_spring = K * (self.theta_v - theta_eq)
         tau_damper = D * self.theta_dot_v
 
@@ -251,15 +295,28 @@ class AdmittanceController(Node):
                 self.theta_dot_v  = 0.0
                 self.theta_ddot_v = 0.0
             else:
-                self.theta_dot_v  = (tau_in - tau_spring) / D
+                self.theta_dot_v  = (tau_in + tau_wall - tau_spring) / D
                 self.theta_ddot_v = 0.0
         else:
-            self.theta_ddot_v = (tau_in - tau_damper - tau_spring) / M
+            self.theta_ddot_v = (tau_in + tau_wall - tau_damper - tau_spring) / M
 
+        # ── Integrazione Euler esplicito ──────────────────────────
         self.theta_dot_v += self.theta_ddot_v * self._dt
         self.theta_dot_v  = float(np.clip(self.theta_dot_v, -dv_max, dv_max))
         self.theta_v     += self.theta_dot_v * self._dt
-        self.theta_v      = float(np.clip(self.theta_v, th_min, th_max))
+
+        # ── Safety clamp di ultima istanza ────────────────────────
+        # Se nonostante la barriera theta_v sfora, clampa posizione
+        # e azzera velocità/accelerazione per evitare che il
+        # trajectory controller spinga contro il finecorsa.
+        if self.theta_v >= th_max:
+            self.theta_v      = float(th_max)
+            self.theta_dot_v  = min(self.theta_dot_v, 0.0)
+            self.theta_ddot_v = min(self.theta_ddot_v, 0.0)
+        elif self.theta_v <= th_min:
+            self.theta_v      = float(th_min)
+            self.theta_dot_v  = max(self.theta_dot_v, 0.0)
+            self.theta_ddot_v = max(self.theta_ddot_v, 0.0)
 
         ref = Float64MultiArray()
         ref.data = [
@@ -278,6 +335,7 @@ class AdmittanceController(Node):
             float(tau_in),
             float(tau_spring),
             float(tau_damper),
+            float(tau_wall),
             float(theta_eq),
             float(M),
             float(D),
