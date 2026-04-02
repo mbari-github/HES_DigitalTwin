@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 """
-tau_ext_sine_pub.py
-====================
 Publishes a sinusoidal torque profile directly as a scalar on
 /exo_dynamics/tau_ext_theta_override (std_msgs/Float64).
 

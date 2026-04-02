@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 """
-tau_ext_step_pub.py
-====================
 Publishes a smoothed step (ramp-and-hold) profile directly as a scalar
 torque on /exo_dynamics/tau_ext_theta_override (std_msgs/Float64).
 

@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+"""
+Tkinter GUI node for manual WrenchStamped input.
+
+Publishes on the same topic and with the same message type as
+external_wrench_pub.py (/exo_dynamics/external_wrench, WrenchStamped),
+so it can be used as a drop-in interactive replacement for the automated
+sine publisher during manual testing.
+
+The slider controls force.z [N]; all other wrench components are zero.
+"""
 
 import rclpy
 from rclpy.node import Node
@@ -10,22 +20,22 @@ class SimpleTorqueGUI(Node):
     def __init__(self):
         super().__init__('simple_torque_gui')
 
-        # Publisher — stesso topic e stesso tipo di external_wrench_pub.py
+        # Same topic and message type as external_wrench_pub.py
         self.publisher = self.create_publisher(
             WrenchStamped, '/exo_dynamics/external_wrench', 10
         )
         self.current_force = 0.0
 
-        # Crea GUI
+        # Build the Tkinter window
         self.root = tk.Tk()
         self.root.title("External Wrench")
         self.root.geometry("350x250")
 
-        # Etichetta forza attuale
+        # Current force readout label
         self.label = tk.Label(self.root, text="Force Z: 0.0 N", font=("Arial", 14))
         self.label.pack(pady=20)
 
-        # Slider forza (force.z), range coerente con external_wrench_pub.py
+        # Slider: range ±25 N, consistent with external_wrench_pub.py defaults
         self.scale = tk.Scale(
             self.root,
             from_=-25.0,
@@ -39,13 +49,13 @@ class SimpleTorqueGUI(Node):
         self.scale.set(0.0)
         self.scale.pack(pady=20)
 
-        # Pulsante zero
+        # Zero button
         tk.Button(self.root, text="ZERO", command=self.set_zero).pack(pady=10)
 
-        self.get_logger().info("Nodo External Wrench GUI avviato")
+        self.get_logger().info("External Wrench GUI node started")
 
     def slider_changed(self, value):
-        """Pubblica WrenchStamped aggiornando force.z con il valore dello slider."""
+        """Publish a WrenchStamped with force.z set to the slider value."""
         force = float(value)
         self.current_force = force
         self.label.config(text=f"Force Z: {force:.1f} N")
@@ -65,7 +75,7 @@ class SimpleTorqueGUI(Node):
         self.publisher.publish(msg)
 
     def set_zero(self):
-        """Imposta la forza a zero."""
+        """Reset slider to zero and publish zero force."""
         self.scale.set(0.0)
 
 

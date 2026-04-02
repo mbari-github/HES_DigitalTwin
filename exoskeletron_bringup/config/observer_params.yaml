@@ -1,69 +1,66 @@
 observer_node:
   ros__parameters:
 
-    # ── Configurazione base ─────────────────────────────────────────────────
+    # ── Base configuration ───────────────────────────────────────────────────
     joint_name:     'rev_crank'
-    publish_rate:   200.0           # [Hz] — deve corrispondere alla rate del plant
+    publish_rate:   200.0           # [Hz] — must match the plant publish rate
 
-    # ── Modello plant (devono corrispondere a dynamics_params.yaml) ─────────
-    fric_visc:      2.0             # [Nm·s/rad]  attrito viscoso
-    fric_coul:      2.0             # [Nm]        attrito Coulomb
-    fric_eps:       0.005           # [rad/s]     soglia tanh Coulomb
-    damping_theta:  1.0             # [Nm·s/rad]  smorzamento addizionale
+    # ── Plant model (must match dynamics_params.yaml) ────────────────────────
+    fric_visc:      2.0             # [Nm·s/rad]  viscous friction
+    fric_coul:      2.0             # [Nm]        Coulomb friction
+    fric_eps:       0.005           # [rad/s]     tanh threshold for Coulomb
+    damping_theta:  1.0             # [Nm·s/rad]  additional linear damping
 
-    # ── Observer 1 — Luenberger (fault detection encoder, canale 3) ─────────
+    # ── Observer 1 — Luenberger (encoder / joint_states fault detection) ────
     #
-    # Poli dell'observer: devono essere più veloci dei poli del plant.
-    # Plant lineare: λ1=0, λ2 = -(fric_visc+damping_theta)/M_eff ≈ -20
-    # Observer: poli ~3-4x più veloci → [-60, -80] è un buon punto di partenza.
+    # Observer poles must be faster than the plant poles.
+    # Linearized plant: λ1=0, λ2 = -(fric_visc+damping_theta)/M_eff ≈ -20.
+    # Observer: poles ~2-3× faster → [-15, -20] is a good starting point.
     #
-    # Più negativi = convergenza più rapida ma più sensibile al rumore.
-    # Se il residuo è troppo rumoroso in nominale, spostare i poli verso 0.
-    # Se il residuo risponde troppo lentamente al guasto, spostare verso -inf.
+    # More negative = faster convergence but higher noise sensitivity.
+    # If the nominal residual is too noisy, move poles toward 0.
+    # If the residual is too slow to react to a fault, move poles toward -∞.
     #
-    # Regola con Eulero esplicito a dt=5ms: restare |polo| < 50.
-    # Plant ha polo dominante ≈ -(fric_visc+damping)/M_eff ≈ -6.
-    # Observer 2-3x più veloce è sufficiente.
+    # Stability rule for explicit Euler at dt=5 ms: keep |pole| < 1/dt = 200.
+    # Plant dominant pole ≈ -(fric_visc+damping)/M_eff ≈ -6.
+    # Observer 2-3× faster is sufficient.
     #
-    # NOTA: l1 = -(p1+p2) - D/M  →  con p1=-15, p2=-20, D/M≈6: l1 = +29  (positivo)
-    #        l2 = p1·p2 - l1·D/M →  300 - 174 = 126
-    # l1 positivo è CORRETTO: garantisce che la correzione riduca l'errore.
+    # Gain derivation: l1 = -(p1+p2) - D/M  →  with p1=-15, p2=-20, D/M≈6: l1 = +29
+    #                  l2 = p1·p2 - l1·D/M  →  300 - 174 = 126
+    # l1 positive is CORRECT: it guarantees the correction term reduces the error.
     obs1_pole_1:   -15.0
     obs1_pole_2:   -20.0
 
-    # ── Observer 2 — Force Balance (fault detection sensore forza, canale 0) ──
+    # ── Observer 2 — Force Balance (tau_ext / force sensor fault detection) ──
     #
-    # Stima τ_ext dal bilancio di forze algebrico (funziona anche a sistema fermo):
+    # Estimates τ_ext from the algebraic force balance (works even when stationary):
     #   τ̂_ext = M_eff·θ̈ + proj + τ_fric_lin - τ_m - τ_pass
     #
-    # obs2_alpha_acc: filtro EMA sul dirty-derivative di θ̇ per stimare θ̈
+    # obs2_alpha_acc: EMA filter on the dirty-derivative of θ̇ for estimating θ̈.
     #
-    # Analisi del bag ha mostrato che M_eff·θ̈ contribuisce solo 0.005 Nm std
-    # al residuo → il rumore da derivata è trascurabile.
-    # Possiamo usare alpha_acc alto senza penalità di rumore.
-    # 0.50 → group delay ≈ 5 ms  (quasi nessun ritardo)
+    # Bag analysis showed that M_eff·θ̈ contributes only 0.005 Nm std to the
+    # residual → derivative noise is negligible. A high alpha_acc can be used
+    # without noise penalty. 0.50 → group delay ≈ 5 ms (almost no lag).
     obs2_alpha_acc:  0.50
 
-    # obs2_alpha_tau: filtro EMA su τ̂_ext
+    # obs2_alpha_tau: EMA filter on τ̂_ext.
     #
-    # Il residuo con alpha_tau=0.05 era dominato da lag (660 ms misurati),
-    # non da rumore. Aumentando a 0.30 il lag scende a ~12 ms e lo std del
-    # residuo nominale passa da 0.21 Nm a ~0.004 Nm (50x miglioramento).
-    # 0.30 → group delay ≈ 12 ms
+    # With alpha_tau=0.05 the residual was dominated by lag (660 ms measured),
+    # not by noise. Raising to 0.30 reduces lag to ~12 ms and improves nominal
+    # residual std from 0.21 Nm to ~0.004 Nm (50× improvement).
+    # 0.30 → group delay ≈ 12 ms.
     obs2_alpha_tau:  0.30
 
-    # ── Filtro EMA sui residui ───────────────────────────────────────────────
+    # ── EMA filter on residuals ──────────────────────────────────────────────
     # alpha ∈ (0, 1]:
-    #   alpha = 1   → nessun filtro (residuo grezzo)
-    #   alpha = 0.1 → filtro aggressivo (costante di tempo ≈ 10 campioni = 50ms a 200Hz)
-    #   alpha = 0.05 → filtro più lento (costante di tempo ≈ 20 campioni = 100ms)
+    #   alpha = 1    → no filter (raw residual)
+    #   alpha = 0.1  → aggressive filter (time constant ≈ 10 samples = 50 ms at 200 Hz)
+    #   alpha = 0.05 → slower filter    (time constant ≈ 20 samples = 100 ms)
     #
-    # Il residuo filtrato è quello da usare per soglie nella safety (meno falsi positivi).
-    #
+    # Use the filtered residual for safety thresholds to reduce false positives.
     residual_filter_alpha: 0.05
 
-    # ── Finestra RMS ─────────────────────────────────────────────────────────
-    # Numero di campioni per il calcolo RMS del residuo (pubblicato nel debug).
-    # 50 campioni @ 200Hz = 250ms di finestra.
-    #
+    # ── RMS window ───────────────────────────────────────────────────────────
+    # Number of samples for the residual RMS computation (published in debug).
+    # 50 samples @ 200 Hz = 250 ms window.
     rms_window:     50

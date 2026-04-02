@@ -24,7 +24,7 @@ def generate_launch_description():
             parameters=[{'robot_description': robot_description_content}],
         ),
 
-        # ── Dinamica dell'esoscheletro ────────────────────────────
+        # ── Reduced dynamics simulation ──────────────────────────
         Node(
             package='exoskeletron_dynamics',
             executable='exo_dynamics',

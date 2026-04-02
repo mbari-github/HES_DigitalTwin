@@ -20,12 +20,12 @@ def generate_launch_description():
     dynamics_params_file   = os.path.join(launch_pkg, 'config', 'dynamics_params.yaml')
 
     # ============================================================
-    # CONFIGURAZIONE GENERALE
+    # GENERAL CONFIGURATION
     # ============================================================
     USE_FAULT_INJECTOR = True
 
     # ============================================================
-    # CONFIGURAZIONE FAULT INJECTION
+    # FAULT INJECTION CONFIGURATION
     # ============================================================
     # channel:
     #   0 -> /exo_dynamics/tau_ext_theta
@@ -44,7 +44,7 @@ def generate_launch_description():
     JOINT_NAME      = 'rev_crank'
 
     # ------------------------------------------------------------
-    # Remaps fault injector
+    # Fault injector remaps — redirect original topics to raw/faulted variants
     # ------------------------------------------------------------
     fault_injector_remaps = {
         0: [
@@ -133,7 +133,7 @@ def generate_launch_description():
             )
 
     # ============================================================
-    # NODI — avvio immediato
+    # NODES — started immediately
     # ============================================================
     nodes_immediate = [
 
@@ -197,7 +197,8 @@ def generate_launch_description():
     ]
 
     # ============================================================
-    # NODI — avvio ritardato di 5 secondi
+    # NODES — delayed start (5 s) to let the bridge and dynamics
+    # settle before the safety state machine begins monitoring
     # ============================================================
     nodes_delayed = [
 
@@ -211,7 +212,7 @@ def generate_launch_description():
     ]
 
     # ============================================================
-    # FAULT INJECTOR
+    # FAULT INJECTOR NODE (conditional)
     # ============================================================
     if USE_FAULT_INJECTOR:
         nodes_immediate.append(

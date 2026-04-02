@@ -18,7 +18,7 @@ def generate_launch_description():
         robot_description_content = infp.read()
 
     # ============================================================
-    # CONFIGURAZIONE FAULT INJECTION
+    # FAULT INJECTION CONFIGURATION
     # ============================================================
     # channel:
     #   0 → /exo_dynamics/tau_ext_theta
@@ -115,10 +115,10 @@ def generate_launch_description():
         )
 
     # ------------------------------------------------------------
-    # Observer
-    # - canale 0: legge tau_ext dal topic raw (pre-fault)
-    # - canale 3: legge joint_states dal topic originale (pre-fault)
-    # Gli altri canali non toccano i topic dell'observer.
+    # Observer remaps
+    # - channel 0: observer reads tau_ext from the raw (pre-fault) topic
+    # - channel 3: observer reads joint_states from the original (pre-fault) topic
+    # Other channels do not affect the observer topics.
     # ------------------------------------------------------------
     observer_remaps = []
     if FAULT_CHANNEL == 0:

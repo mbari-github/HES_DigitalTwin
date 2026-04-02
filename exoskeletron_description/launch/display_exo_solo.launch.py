@@ -5,17 +5,16 @@ import os
 
 
 def generate_launch_description():
-    # Percorso al file URDF
     pkg_share = get_package_share_directory('exoskeletron_description')
+    # Uses the exoskeleton-only URDF (no hand model)
     urdf_file = os.path.join(pkg_share, 'urdf', 'assembly.urdf')
 
-    # Legge il contenuto del file URDF
     with open(urdf_file, 'r') as infp:
         robot_description_content = infp.read()
 
     return LaunchDescription([
 
-        # Robot State Publisher
+        # Robot State Publisher — broadcasts TF from URDF
         Node(
             package='robot_state_publisher',
             executable='robot_state_publisher',
@@ -24,7 +23,7 @@ def generate_launch_description():
             parameters=[{'robot_description': robot_description_content}]
         ),
 
-        #GUI per ruotare il giunto motore (pubblica su /joint_states)
+        # GUI slider for manually rotating the motor joint (publishes on /joint_states)
         Node(
             package='joint_state_publisher_gui',
             executable='joint_state_publisher_gui',
@@ -32,7 +31,7 @@ def generate_launch_description():
             output='screen'
         ),
 
-        # RViz
+        # RViz visualization
         Node(
             package='rviz2',
             executable='rviz2',

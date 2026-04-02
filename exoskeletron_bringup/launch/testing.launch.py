@@ -5,21 +5,17 @@ import os
 
 
 def generate_launch_description():
-    # Percorso al file URDF
     description_pkg = get_package_share_directory('exoskeletron_description')
     launch_pkg      = get_package_share_directory('exoskeletron_bringup')
 
-
     urdf_file = os.path.join(description_pkg, 'urdf', 'assembly_with_hand.urdf')
 
-
-    # Legge il contenuto del file URDF
     with open(urdf_file, 'r') as infp:
         robot_description_content = infp.read()
 
     return LaunchDescription([
 
-        # Robot State Publisher
+        # Robot State Publisher — broadcasts TF from URDF
         Node(
             package='robot_state_publisher',
             executable='robot_state_publisher',
@@ -28,6 +24,7 @@ def generate_launch_description():
             parameters=[{'robot_description': robot_description_content}]
         ),
 
+        # Reduced dynamics simulation
         Node(
             package='exoskeletron_dynamics',
             executable='exo_dynamics',
@@ -35,7 +32,7 @@ def generate_launch_description():
             output='screen'
         ),
 
-        # RViz
+        # RViz visualization
         Node(
             package='rviz2',
             executable='rviz2',
@@ -44,7 +41,7 @@ def generate_launch_description():
             arguments=['-d', os.path.join(description_pkg, 'rviz', 'exo_display.rviz')]
         ),
 
-        # Input su /exo_dynamics/external_wrench
+        # External wrench step-profile input on /exo_dynamics/external_wrench
         Node(
             package='exoskeletron_utils',
             executable='external_wrench_step',
@@ -52,7 +49,7 @@ def generate_launch_description():
             output='screen',
         ),
 
-        # LOGGER
+        # CSV logger (disabled by default — uncomment to enable)
         # Node(
         #     package='exoskeletron_utils',
         #     executable='logger',
@@ -60,23 +57,20 @@ def generate_launch_description():
         #     output='screen',
         # ),
 
-
-        # Nodes for control loop - DA RIVEDERE
-        # Admittance Controller
+        # Outer admittance loop
         Node(
             package='exoskeletron_control',
             executable='admittance_controller',
             name='admittance_controller',
             output='screen',
         ),
-        
-        # Trajectory Controller (PD + compensazione feedforward gravità e inerzia)
+
+        # Inner trajectory loop (PD + full feed-forward)
         Node(
             package='exoskeletron_control',
             executable='trajectory_controller',
             name='trajectory_controller',
             output='screen',
         ),
-
 
     ])
