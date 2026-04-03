@@ -236,7 +236,7 @@ ros2 launch exoskeletron_bringup testing.launch.py
 
 ### `control_loop_only.launch.py` — Solo loop di controllo
 
-Simile a `testing.launch.py` ma usa `dynamics_stripped` (versione semplificata del plant).
+Simile a `testing.launch.py` ma usa `dynamics_stripped` (versione semplificata del plant). Utile per testare il sistema passando l'input scelto direttamente a `tau_ext_theta`, e non a `external_wrench`, in modo da bypassare la riduzione sul DoF.
 
 ```bash
 ros2 launch exoskeletron_bringup control_loop_only.launch.py
@@ -244,7 +244,7 @@ ros2 launch exoskeletron_bringup control_loop_only.launch.py
 
 ### `testing_bridge.launch.py` — Sistema completo con bridge e safety
 
-Avvia l'intero stack: plant, controller, bridge, state machine (con ritardo 5s), e opzionalmente il fault injector.
+Avvia l'intero stack: plant, controller, bridge, state machine (con ritardo 5s), e opzionalmente il fault injector (in questo caso invece l'input è passato a `external_wrench`).
 
 ```bash
 ros2 launch exoskeletron_bringup testing_bridge.launch.py
