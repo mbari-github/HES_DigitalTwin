@@ -106,11 +106,17 @@ L'attrito Coulomb **non** viene compensato nel feed-forward (causa sovracompensa
 - `compliant` — clamp coppia, velocità e accelerazione
 - `stop` — coppia zero o holding statico (configurabile via `stop_mode`)
 
-**Funzionalità:**
-- Watchdog per-canale con timeout configurabile e periodo di grazia all'avvio
-- Pubblicazione freeze/unfreeze per l'admittance controller
-- Client per richiesta safe stop alla state machine
-- Status completo su `/exo_bridge/status` (9 campi, inclusa coppia pre-clamp per il downgrade)
+**Feature di sicurezza funzionale implementate:**
+
+- **Watchdog per-canale** — monitora 4 canali critici (`torque`, `trajectory_ref`, `tau_ext_theta`, `joint_states`). Dopo un periodo di grazia all'avvio, qualsiasi canale che supera il timeout senza nuovi messaggi scatena una richiesta di safe stop alla state machine. Il ripristino del canale viene notificato via log.
+
+- **Heartbeat bidirezionale (lato bridge)** — il bridge pubblica `/exo_bridge/status` a 200 Hz verso la state machine (heartbeat uscente) e chiama il servizio `/safe_stop_request` per la scalata (heartbeat entrante). La state machine monitora la liveness di questo flusso (vedi sotto).
+
+- **Pubblicazione tau_raw vs tau_out** — lo status include sia la coppia post-clamp (`tau_out`, effettivamente applicata al plant) sia quella pre-clamp (`tau_raw`, voluta dal controller). La state machine usa `tau_raw` per le decisioni di downgrade: `tau_out` è per costruzione sempre entro i limiti e non segnalerebbe mai il rientro dalla condizione di fault.
+
+- **Freeze/Unfreeze dell'admittance controller** — all'ingresso in modalità STOP il bridge pubblica `freeze=True` su `/admittance/freeze`, bloccando l'integratore virtuale dell'admittance per evitare deriva di posizione. Il freeze viene rilasciato su qualsiasi transizione di uscita da STOP (non solo verso `nominal`).
+
+- **Status completo** — `/exo_bridge/status` (9 campi: `is_stop`, `is_limited`, `θ`, `θ̇`, `θ_hold`, `τ_out`, `τ_ext`, `mode_id`, `τ_raw`) fornisce a tutti i supervisori il quadro completo dello stato del gateway.
 
 ### `exoskeletron_safety_manager`
 
@@ -123,12 +129,21 @@ State machine plugin-based in C++ che gestisce la sicurezza funzionale.
 - `SAFE_STOP` — arresto di sicurezza (latchabile)
 - `SENSOR_DEGRADED_MODE` — riservato per integrazione futura con gli observer
 
-**Meccanismi di protezione:**
-- Escalation basata su soglie di coppia e velocità con debounce configurabile
-- Downgrade automatico opzionale (contatore positivi/negativi con peso asimmetrico)
-- Supervisione liveness del bridge (timeout su `/exo_bridge/status`)
-- Coerenza modalità bridge (mismatch counter con soglia)
-- Fault latching con reset esplicito via servizio
+**Feature di sicurezza funzionale implementate:**
+
+- **Escalation basata su soglie con debounce** — in stato `FAULT_MONITOR`, coppia (`tau_out`) e velocità vengono monitorati ad ogni ciclo. L'escalation avviene su tre livelli (`COMPLIANT`, `TORQUE_LIMIT`, `SAFE_STOP`) in base a soglie configurabili. Ogni livello richiede un numero minimo di campioni consecutivi sopra soglia (debounce) prima di scatenare la transizione, per filtrare picchi transienti.
+
+- **Heartbeat bidirezionale (lato state machine)** — la state machine monitora la ricezione di `/exo_bridge/status` a 10 Hz. Se il bridge non pubblica entro `bridge_liveness_timeout_sec`, viene forzato il `SAFE_STOP`. Una finestra di grazia (`bridge_liveness_grace_sec`) sopprime il controllo all'avvio finché il bridge non è stato visto almeno una volta. In assenza totale di messaggi dopo la grazia, la scalata avviene comunque.
+
+- **Coherence check (coerenza modalità bridge)** — ad ogni messaggio di status, la state machine confronta il `mode_id` riportato dal bridge con quello atteso per lo stato corrente. Un mismatch sostenuto per `mode_mismatch_threshold` campioni consecutivi causa una transizione a `SAFE_STOP`. Il contatore viene azzerato ad ogni transizione di stato per lasciare al bridge 1–2 cicli di aggiornamento.
+
+- **Downgrade automatico** — meccanismo opzionale per il rientro automatico da stati di protezione. Un contatore asimmetrico (campioni "positivi" quando coppia e velocità sono sotto le soglie di uscita, decremento pesato altrimenti) misura la stabilità. Al raggiungimento della soglia configurata, la state machine scende di un livello (`TORQUE_LIMIT` → `COMPLIANT` → `FAULT_MONITOR`), con possibilità di salto diretto se entrambe le soglie sono soddisfatte.
+
+- **Fault latching** — l'ingresso in `SAFE_STOP` imposta un latch irreversibile: nessuna altra transizione (automatica o da servizio) è ammessa finché non viene inviato esplicitamente `/reset_safety_request`. Questo garantisce che la condizione di fault non venga ignorata silenziosamente.
+
+- **Tabella transizioni controllata** — la state machine applica una tabella esplicita delle transizioni consentite. Transizioni non previste (es. da `SAFE_STOP` a `COMPLIANT_MODE` senza reset) vengono rifiutate e loggate. Le transizioni in corso bloccano eventuali richieste concorrenti.
+
+- **Periodo di grazia all'avvio** — il plugin `FaultMonitorMode` sopprime la valutazione delle soglie per un intervallo configurabile dopo l'inizializzazione, per evitare false escalation durante la fase di stabilizzazione dei segnali all'avvio del sistema.
 
 ### `exoskeletron_observers`
 
