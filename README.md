@@ -25,7 +25,7 @@ Digital Twin ROS 2 di un esoscheletro per la riabilitazione della mano (Hand Exo
 
 ## Docker
 
-Il modo più rapido per avere l'ambiente completo (Ubuntu 24.04, ROS 2 Jazzy, Pinocchio, NumPy, SciPy) è usare il `Dockerfile` incluso nella root del repository.
+Il modo più rapido per avere l'ambiente completo (Ubuntu 24.04, ROS 2 Jazzy, Pinocchio, NumPy, SciPy) è usare il `Dockerfile` incluso nella root del repository. [NON E' ANCORA STATO TESTATO, DOVREBBE FUNZIONARE]
 
 ### Build dell'immagine
 
@@ -52,13 +52,11 @@ docker run -it --rm \
   hes_digital_twin
 ```
 
-All'interno del container il workspace è già compilato e sourciato. È possibile avviare direttamente i launch file:
+All'interno del container il workspace è già compilato e sourced. È possibile avviare direttamente i launch file:
 
 ```bash
 ros2 launch exoskeletron_bringup testing.launch.py
 ```
-
-> **Nota:** su sistemi senza display fisico (es. server remoto) aggiungere `--env QT_QPA_PLATFORM=offscreen` per evitare che RViz2 vada in crash all'avvio.
 
 ---
 
