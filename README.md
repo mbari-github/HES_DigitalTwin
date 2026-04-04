@@ -8,6 +8,7 @@ Digital Twin ROS 2 di un esoscheletro per la riabilitazione della mano (Hand Exo
 
 ## Indice
 
+- [Docker](#docker)
 - [Architettura del sistema](#architettura-del-sistema)
 - [Pacchetti ROS 2](#pacchetti-ros-2)
 - [Prerequisiti](#prerequisiti)
@@ -19,6 +20,45 @@ Digital Twin ROS 2 di un esoscheletro per la riabilitazione della mano (Hand Exo
 - [Fault Injection](#fault-injection)
 - [Struttura del workspace](#struttura-del-workspace)
 - [Note per lo sviluppo futuro](#note-per-lo-sviluppo-futuro)
+
+---
+
+## Docker
+
+Il modo più rapido per avere l'ambiente completo (Ubuntu 24.04, ROS 2 Jazzy, Pinocchio, NumPy, SciPy) è usare il `Dockerfile` incluso nella root del repository.
+
+### Build dell'immagine
+
+```bash
+# Dalla root del repository
+docker build -t hes_digital_twin .
+```
+
+### Avvio del container
+
+**Solo terminale (headless):**
+
+```bash
+docker run -it --rm hes_digital_twin
+```
+
+**Con supporto GUI** (RViz2, GUI Tkinter — richiede X11):
+
+```bash
+xhost +local:docker
+docker run -it --rm \
+  --env DISPLAY=$DISPLAY \
+  --volume /tmp/.X11-unix:/tmp/.X11-unix \
+  hes_digital_twin
+```
+
+All'interno del container il workspace è già compilato e sourciato. È possibile avviare direttamente i launch file:
+
+```bash
+ros2 launch exoskeletron_bringup testing.launch.py
+```
+
+> **Nota:** su sistemi senza display fisico (es. server remoto) aggiungere `--env QT_QPA_PLATFORM=offscreen` per evitare che RViz2 vada in crash all'avvio.
 
 ---
 
