@@ -1,0 +1,58 @@
+koopman_fdi_node:
+  ros__parameters:
+
+    joint_name: rev_crank
+    publish_rate: 200.0
+
+    # ── System modeling ─────────────────────────────────────────
+    #
+    #   M_eff · θ̈ = τ_m + τ_pass + τ_ext - proj - τ_fric - τ_damp
+    #
+    #   State  x = [θ, θ̇]          (2D)  from /joint_states
+    #   Input  u = [τ_m, τ_ext]     (2D)  from /torque and /tau_ext_theta
+    #   Output y = [θ, θ̇]          (2D)  = state (fully measured)
+    #
+    # Fault channels:
+    #   CH0: /exo_dynamics/tau_ext_theta  → force sensor fault
+    #   CH1: /trajectory_ref             → outer-loop (admittance) fault
+    #   CH2: /torque                     → inner-loop (actuator) fault
+    #   CH3: /joint_states               → encoder fault
+
+    # ── Training ────────────────────────────────────────────────
+    # Duration of healthy data collection before training [s].
+    # At 200 Hz, 30s = 6000 samples.
+    # IMPORTANT: Ensure fault_injector is INACTIVE during collection.
+    training_duration: 30.0
+
+    # Extra dimensions in the lifted Koopman space.
+    # Total lifted state dim = n_x (2) + lifting_dim.
+    lifting_dim: 16
+
+    # Neural network training
+    training_epochs: 200
+    learning_rate: 0.001
+
+    # ── Observer bank ───────────────────────────────────────────
+    # Pole magnitude for Luenberger observers in lifted space.
+    # 0 < pole_mag < 1.  Closer to 0 = faster, noisier.
+    observer_poles: 0.85
+
+    # ── Detection ───────────────────────────────────────────────
+    # Fixed threshold (used when adaptive_threshold = false)
+    detection_threshold: 0.5
+
+    # Isolation ratio: fault is isolated to channel i if the
+    # insensitive observer residual is < 1/ratio of the others.
+    isolation_ratio: 2.0
+
+    # Consecutive detections before alarm (at 200Hz, 10 = 50ms)
+    persistence_count: 10
+
+    # ── Adaptive thresholds ─────────────────────────────────────
+    adaptive_threshold: true
+    adaptive_sigma: 5.0
+    adaptive_window: 1000    # 5s at 200Hz
+
+    # ── Model persistence ───────────────────────────────────────
+    model_path: "/home/mbari/koopman_fdi_model.npz"
+    load_model: false

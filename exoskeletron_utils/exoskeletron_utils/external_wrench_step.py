@@ -57,7 +57,7 @@ Usage in launch file
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float64
+from exoskeletron_safety_msgs.msg import Float64Stamped
 
 
 class TauExtStepPublisher(Node):
@@ -80,7 +80,7 @@ class TauExtStepPublisher(Node):
         topic_name   = str(self.get_parameter('topic_name').value)
         publish_rate = float(self.get_parameter('publish_rate').value)
 
-        self.publisher_ = self.create_publisher(Float64, topic_name, 10)
+        self.publisher_ = self.create_publisher(Float64Stamped, topic_name, 10)
 
         self.t0 = self.get_clock().now()
         self._rep_count = 0
@@ -149,7 +149,8 @@ class TauExtStepPublisher(Node):
             t = (now - self.t0).nanoseconds * 1e-9
             tau = self._compute_tau(t)
 
-        msg = Float64()
+        msg = Float64Stamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
         msg.data = tau
         self.publisher_.publish(msg)
 

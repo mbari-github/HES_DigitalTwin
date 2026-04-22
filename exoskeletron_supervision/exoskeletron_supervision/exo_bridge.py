@@ -27,7 +27,7 @@ Design notes
   tau_out is always within limits by construction and would never signal
   that the fault condition has cleared.
 
-Layout of /exo_bridge/status (Float64MultiArray):
+Layout of /exo_bridge/status (exoskeletron_safety_msgs/Float64ArrayStamped):
   data[0] = is_stop           (1.0 if mode==stop, else 0.0)
   data[1] = is_limited        (1.0 if mode==torque_limit or compliant)
   data[2] = theta             (rev_crank position)
@@ -44,7 +44,8 @@ from typing import Optional
 import rclpy
 from rclpy.node import Node
 
-from std_msgs.msg import Float64, Float64MultiArray, String, Bool
+from std_msgs.msg import String, Bool
+from exoskeletron_safety_msgs.msg import Float64Stamped, Float64ArrayStamped
 from std_srvs.srv import SetBool
 from sensor_msgs.msg import JointState
 
@@ -86,10 +87,10 @@ class ExoBridge(Node):
         self.control_mode: str            = 'nominal'
         self.theta_hold: Optional[float]  = None
 
-        self.last_joint_state:       Optional[JointState]        = None
-        self.last_trajectory_ref_in: Optional[Float64MultiArray] = None
-        self.last_torque_in:         Optional[Float64]           = None
-        self.last_tau_ext:           Optional[Float64]           = None
+        self.last_joint_state:       Optional[JointState]           = None
+        self.last_trajectory_ref_in: Optional[Float64ArrayStamped] = None
+        self.last_torque_in:         Optional[Float64Stamped]       = None
+        self.last_tau_ext:           Optional[Float64Stamped]       = None
 
         # Torque actually sent to the plant in the last cycle (post-clamp)
         self.tau_out_last: float = 0.0
@@ -104,15 +105,15 @@ class ExoBridge(Node):
         self._start_time: float = self.get_clock().now().nanoseconds * 1e-9
 
         # ── Subscribers ──────────────────────────────────────────────
-        self.create_subscription(JointState,        '/joint_states',               self._cb_js,  10)
-        self.create_subscription(Float64MultiArray, '/trajectory_ref_raw',         self._cb_ref, 10)
-        self.create_subscription(Float64,           '/torque_raw',                 self._cb_tau, 10)
-        self.create_subscription(Float64,           '/exo_dynamics/tau_ext_theta', self._cb_ext, 10)
+        self.create_subscription(JointState,           '/joint_states',               self._cb_js,  10)
+        self.create_subscription(Float64ArrayStamped, '/trajectory_ref_raw',         self._cb_ref, 10)
+        self.create_subscription(Float64Stamped,      '/torque_raw',                 self._cb_tau, 10)
+        self.create_subscription(Float64Stamped,      '/exo_dynamics/tau_ext_theta', self._cb_ext, 10)
 
         # ── Publishers ───────────────────────────────────────────────
-        self.trajectory_ref_pub  = self.create_publisher(Float64MultiArray, '/trajectory_ref',    10)
-        self.torque_pub          = self.create_publisher(Float64,           '/torque',             10)
-        self.bridge_status_pub   = self.create_publisher(Float64MultiArray, '/exo_bridge/status',  10)
+        self.trajectory_ref_pub  = self.create_publisher(Float64ArrayStamped, '/trajectory_ref',    10)
+        self.torque_pub          = self.create_publisher(Float64Stamped,      '/torque',             10)
+        self.bridge_status_pub   = self.create_publisher(Float64ArrayStamped, '/exo_bridge/status',  10)
         self.mode_pub            = self.create_publisher(String,            '/exo_bridge/mode',    10)
         self.admittance_freeze_pub = self.create_publisher(Bool,            '/admittance/freeze',  10)
 
@@ -139,15 +140,15 @@ class ExoBridge(Node):
         self.last_joint_state = msg
         self._touch(CH_JS)
 
-    def _cb_ref(self, msg: Float64MultiArray):
+    def _cb_ref(self, msg: Float64ArrayStamped):
         self.last_trajectory_ref_in = msg
         self._touch(CH_TRAJ)
 
-    def _cb_tau(self, msg: Float64):
+    def _cb_tau(self, msg: Float64Stamped):
         self.last_torque_in = msg
         self._touch(CH_TORQUE)
 
-    def _cb_ext(self, msg: Float64):
+    def _cb_ext(self, msg: Float64Stamped):
         self.last_tau_ext = msg
         self._touch(CH_TAU_EXT)
 
@@ -283,7 +284,7 @@ class ExoBridge(Node):
 
     # ── Safe trajectory ──────────────────────────────────────────────
 
-    def _safe_trajectory_ref(self) -> Optional[Float64MultiArray]:
+    def _safe_trajectory_ref(self) -> Optional[Float64ArrayStamped]:
         if self.control_mode == 'stop':
             return self._hold_reference()
         if self.last_trajectory_ref_in is None:
@@ -298,16 +299,18 @@ class ExoBridge(Node):
         if self.control_mode == 'compliant':
             theta_dot_ref  = self.clamp(theta_dot_ref,  -self.compliant_vel_limit, self.compliant_vel_limit)
             theta_ddot_ref = self.clamp(theta_ddot_ref, -self.compliant_acc_limit, self.compliant_acc_limit)
+        ref.header.stamp = self.get_clock().now().to_msg()
         ref.data = [theta_ref, theta_dot_ref, theta_ddot_ref]
         return ref
 
     # ── Safe torque ──────────────────────────────────────────────────
 
-    def _safe_torque(self) -> Optional[Float64]:
+    def _safe_torque(self) -> Optional[Float64Stamped]:
         if self.last_torque_in is None:
             return None
         tau_in = float(self.last_torque_in.data)
-        msg = Float64()
+        msg = Float64Stamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
         if self.control_mode == 'stop':
             msg.data = self._stop_torque(tau_in)
         elif self.control_mode == 'torque_limit':
@@ -326,11 +329,16 @@ class ExoBridge(Node):
         # hold_and_zero_torque or unrecognised value → safe default
         return 0.0
 
-    def _hold_reference(self) -> Optional[Float64MultiArray]:
+    def _hold_reference(self) -> Optional[Float64ArrayStamped]:
         theta = self.theta_hold if self.theta_hold is not None else self.get_current_theta()
         if theta is None:
-            return copy.deepcopy(self.last_trajectory_ref_in) if self.last_trajectory_ref_in else None
-        msg = Float64MultiArray()
+            if self.last_trajectory_ref_in is None:
+                return None
+            ref = copy.deepcopy(self.last_trajectory_ref_in)
+            ref.header.stamp = self.get_clock().now().to_msg()
+            return ref
+        msg = Float64ArrayStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
         msg.data = [float(theta), 0.0, 0.0]
         return msg
 
@@ -380,7 +388,8 @@ class ExoBridge(Node):
         # within limits by construction and would never indicate fault recovery).
         tau_raw = self.last_torque_in.data if self.last_torque_in else float('nan')
 
-        msg = Float64MultiArray()
+        msg = Float64ArrayStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
         msg.data = [
             1.0 if self.control_mode == 'stop' else 0.0,                     # [0] is_stop
             1.0 if self.control_mode in ('torque_limit', 'compliant') else 0.0, # [1] is_limited

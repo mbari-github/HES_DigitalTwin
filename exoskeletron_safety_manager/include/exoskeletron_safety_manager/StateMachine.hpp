@@ -10,8 +10,8 @@
 #include "exoskeletron_safety_manager/SafetyTools.hpp"
 #include "exoskeletron_safety_manager/safety_states.hpp"
 
-#include "std_msgs/msg/float64_multi_array.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "exoskeletron_safety_msgs/msg/float64_array_stamped.hpp"
 #include "std_srvs/srv/set_bool.hpp"
 #include "std_srvs/srv/trigger.hpp"
 
@@ -127,7 +127,7 @@ private:
 
   // ── Automatic downgrade ───────────────────────────────────────────
   void bridge_status_callback(
-    const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+    const exoskeletron_safety_msgs::msg::Float64ArrayStamped::SharedPtr msg);
 
   void evaluate_downgrade(double tau_in, double theta_dot);
   void reset_downgrade_counters();
@@ -155,7 +155,7 @@ private:
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_safety_service_;
 
   // ── Subscriptions ─────────────────────────────────────────────────
-  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr
+  rclcpp::Subscription<exoskeletron_safety_msgs::msg::Float64ArrayStamped>::SharedPtr
     bridge_status_sub_;
 
   // ── Publishers ────────────────────────────────────────────────────

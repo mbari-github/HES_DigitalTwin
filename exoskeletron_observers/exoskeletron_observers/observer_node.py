@@ -43,17 +43,17 @@ Implements four complementary detection layers:
 Topics
 ------
   Sub:  /joint_states                    sensor_msgs/JointState
-        /exo_dynamics/tau_ext_theta      std_msgs/Float64
-        /exo_dynamics/ff_terms           std_msgs/Float64MultiArray
-        /torque_raw                      std_msgs/Float64
-        /trajectory_ref                  std_msgs/Float64MultiArray
-  Pub:  /observer/state_residual         std_msgs/Float64
-        /observer/torque_residual        std_msgs/Float64
-        /observer/momentum_residual      std_msgs/Float64
-        /observer/tau_ext_rate_alarm     std_msgs/Float64
-        /observer/state_rms              std_msgs/Float64
-        /observer/torque_rms             std_msgs/Float64
-        /observer/debug                  std_msgs/Float64MultiArray  (21 fields)
+        /exo_dynamics/tau_ext_theta      exoskeletron_safety_msgs/Float64Stamped
+        /exo_dynamics/ff_terms           exoskeletron_safety_msgs/Float64ArrayStamped
+        /torque_raw                      exoskeletron_safety_msgs/Float64Stamped
+        /trajectory_ref                  exoskeletron_safety_msgs/Float64ArrayStamped
+  Pub:  /observer/state_residual         exoskeletron_safety_msgs/Float64Stamped
+        /observer/torque_residual        exoskeletron_safety_msgs/Float64Stamped
+        /observer/momentum_residual      exoskeletron_safety_msgs/Float64Stamped
+        /observer/tau_ext_rate_alarm     exoskeletron_safety_msgs/Float64Stamped
+        /observer/state_rms              exoskeletron_safety_msgs/Float64Stamped
+        /observer/torque_rms             exoskeletron_safety_msgs/Float64Stamped
+        /observer/debug                  exoskeletron_safety_msgs/Float64ArrayStamped  (21 fields)
 
 ROS2 Parameters
 ---------------
@@ -98,7 +98,7 @@ from collections import deque
 import rclpy
 from rclpy.node import Node
 
-from std_msgs.msg import Float64, Float64MultiArray
+from exoskeletron_safety_msgs.msg import Float64Stamped, Float64ArrayStamped
 from sensor_msgs.msg import JointState
 
 
@@ -223,19 +223,19 @@ class ObserverNode(Node):
 
         # ── Subscribers ───────────────────────────────────────────────
         self.create_subscription(JointState, '/joint_states', self._js_cb, 10)
-        self.create_subscription(Float64, '/exo_dynamics/tau_ext_theta', self._tau_ext_cb, 10)
-        self.create_subscription(Float64MultiArray, '/exo_dynamics/ff_terms', self._ff_cb, 10)
-        self.create_subscription(Float64, '/torque_raw', self._tau_m_cb, 10)
-        self.create_subscription(Float64MultiArray, '/trajectory_ref', self._traj_cb, 10)
+        self.create_subscription(Float64Stamped, '/exo_dynamics/tau_ext_theta', self._tau_ext_cb, 10)
+        self.create_subscription(Float64ArrayStamped, '/exo_dynamics/ff_terms', self._ff_cb, 10)
+        self.create_subscription(Float64Stamped, '/torque_raw', self._tau_m_cb, 10)
+        self.create_subscription(Float64ArrayStamped, '/trajectory_ref', self._traj_cb, 10)
 
         # ── Publishers ────────────────────────────────────────────────
-        self._pub_state = self.create_publisher(Float64, '/observer/state_residual', 10)
-        self._pub_torque = self.create_publisher(Float64, '/observer/torque_residual', 10)
-        self._pub_momentum = self.create_publisher(Float64, '/observer/momentum_residual', 10)
-        self._pub_rate_alarm = self.create_publisher(Float64, '/observer/tau_ext_rate_alarm', 10)
-        self._pub_state_rms = self.create_publisher(Float64, '/observer/state_rms', 10)
-        self._pub_torque_rms = self.create_publisher(Float64, '/observer/torque_rms', 10)
-        self._pub_debug = self.create_publisher(Float64MultiArray, '/observer/debug', 10)
+        self._pub_state = self.create_publisher(Float64Stamped, '/observer/state_residual', 10)
+        self._pub_torque = self.create_publisher(Float64Stamped, '/observer/torque_residual', 10)
+        self._pub_momentum = self.create_publisher(Float64Stamped, '/observer/momentum_residual', 10)
+        self._pub_rate_alarm = self.create_publisher(Float64Stamped, '/observer/tau_ext_rate_alarm', 10)
+        self._pub_state_rms = self.create_publisher(Float64Stamped, '/observer/state_rms', 10)
+        self._pub_torque_rms = self.create_publisher(Float64Stamped, '/observer/torque_rms', 10)
+        self._pub_debug = self.create_publisher(Float64ArrayStamped, '/observer/debug', 10)
 
         self.create_timer(self._dt, self._update)
 
@@ -477,27 +477,35 @@ class ObserverNode(Node):
 
         # ── PUBLISH ──────────────────────────────────────────────────
 
-        msg = Float64()
+        stamp = self.get_clock().now().to_msg()
+
+        msg = Float64Stamped()
+        msg.header.stamp = stamp
         msg.data = state_res
         self._pub_state.publish(msg)
 
-        msg = Float64()
+        msg = Float64Stamped()
+        msg.header.stamp = stamp
         msg.data = torque_res
         self._pub_torque.publish(msg)
 
-        msg = Float64()
+        msg = Float64Stamped()
+        msg.header.stamp = stamp
         msg.data = self._r_momentum
         self._pub_momentum.publish(msg)
 
-        msg = Float64()
+        msg = Float64Stamped()
+        msg.header.stamp = stamp
         msg.data = 1.0 if self._rate_alarm else 0.0
         self._pub_rate_alarm.publish(msg)
 
-        msg = Float64()
+        msg = Float64Stamped()
+        msg.header.stamp = stamp
         msg.data = state_rms
         self._pub_state_rms.publish(msg)
 
-        msg = Float64()
+        msg = Float64Stamped()
+        msg.header.stamp = stamp
         msg.data = torque_rms
         self._pub_torque_rms.publish(msg)
 
@@ -523,7 +531,8 @@ class ObserverNode(Node):
         # [18] tau_ext_rate [Nm/s]
         # [19] rate_alarm (1.0 / 0.0)
         # [20] p_momentum (M_eff · θ̇)
-        dbg = Float64MultiArray()
+        dbg = Float64ArrayStamped()
+        dbg.header.stamp = stamp
         dbg.data = [
             self._theta_hat,                                    # 0
             self._theta_dot_hat,                                # 1

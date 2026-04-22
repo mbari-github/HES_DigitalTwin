@@ -61,9 +61,9 @@ class TestStateMachineIntegration(unittest.TestCase):
     def setUp(self):
         from rclpy.node import Node as RclpyNode
         from std_srvs.srv import SetBool, Trigger
-        from std_msgs.msg import Float64MultiArray, String
+        from std_msgs.msg import String
         from exoskeletron_safety_msgs.srv import SetMode
-        from exoskeletron_safety_msgs.msg import SafetyStatus
+        from exoskeletron_safety_msgs.msg import SafetyStatus, Float64ArrayStamped
 
         self.node = RclpyNode('sm_test')
 
@@ -81,7 +81,7 @@ class TestStateMachineIntegration(unittest.TestCase):
             SetMode, '/bridge/set_mode', self._bridge_cb)
 
         self.status_pub = self.node.create_publisher(
-            Float64MultiArray, '/exo_bridge/status', 10)
+            Float64ArrayStamped, '/exo_bridge/status', 10)
 
         self.last_state = None
         self.node.create_subscription(
@@ -147,8 +147,8 @@ class TestStateMachineIntegration(unittest.TestCase):
         return fut.result()
 
     def _pub_status(self, mode_id=0.0):
-        from std_msgs.msg import Float64MultiArray
-        msg = Float64MultiArray()
+        msg = Float64ArrayStamped()
+        msg.header.stamp = self.node.get_clock().now().to_msg()
         msg.data = [
             0.0, 0.0, 0.5, 0.1,
             float('nan'), 0.5, 0.0, mode_id, 0.5,

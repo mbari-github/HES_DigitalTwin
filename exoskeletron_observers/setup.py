@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'observer_node = exoskeletron_observers.observer_node:main',
+            'koopman_fdi_node = exoskeletron_observers.koopman_fdi_node:main',
         ],
     },
 )

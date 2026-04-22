@@ -5,7 +5,7 @@
 #include "exoskeletron_safety_manager/BridgeModeClient.hpp"
 
 #include <rclcpp/rclcpp.hpp>
-#include <std_msgs/msg/float64_multi_array.hpp>
+#include <exoskeletron_safety_msgs/msg/float64_array_stamped.hpp>
 #include <std_srvs/srv/set_bool.hpp>
 
 namespace functional_safety
@@ -82,7 +82,7 @@ public:
   void load_thresholds_from_params();
 
 private:
-  void bridge_status_callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+  void bridge_status_callback(const exoskeletron_safety_msgs::msg::Float64ArrayStamped::SharedPtr msg);
   void watchdog_callback();
 
   // Escalation evaluation
@@ -105,7 +105,7 @@ private:
     bool value);
 
 private:
-  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr bridge_status_sub_;
+  rclcpp::Subscription<exoskeletron_safety_msgs::msg::Float64ArrayStamped>::SharedPtr bridge_status_sub_;
   rclcpp::TimerBase::SharedPtr watchdog_timer_;
 
   rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr compliant_client_;

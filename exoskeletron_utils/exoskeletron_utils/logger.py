@@ -8,13 +8,13 @@ Function:
 - Periodically writes a CSV row with a local timestamp and all fields.
 
 Subscribed topics:
-  /exo_dynamics/debug         std_msgs/Float64MultiArray
-  /exo_dynamics/ff_terms      std_msgs/Float64MultiArray
-  /exo_dynamics/model_debug   std_msgs/Float64MultiArray   (optional)
-  /traj_ctrl/debug            std_msgs/Float64MultiArray
-  /admittance/debug           std_msgs/Float64MultiArray
-  /joint_states               sensor_msgs/JointState       (optional, redundancy)
-  /torque                     std_msgs/Float64             (optional, redundancy)
+  /exo_dynamics/debug         exoskeletron_safety_msgs/Float64ArrayStamped
+  /exo_dynamics/ff_terms      exoskeletron_safety_msgs/Float64ArrayStamped
+  /exo_dynamics/model_debug   exoskeletron_safety_msgs/Float64ArrayStamped   (optional)
+  /traj_ctrl/debug            exoskeletron_safety_msgs/Float64ArrayStamped
+  /admittance/debug           exoskeletron_safety_msgs/Float64ArrayStamped
+  /joint_states               sensor_msgs/JointState                         (optional, redundancy)
+  /torque                     exoskeletron_safety_msgs/Float64Stamped         (optional, redundancy)
 
 Output:
   CSV file with stable columns and periodic flush to disk.
@@ -35,7 +35,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 
-from std_msgs.msg import Float64, Float64MultiArray
+from exoskeletron_safety_msgs.msg import Float64Stamped, Float64ArrayStamped
 from sensor_msgs.msg import JointState
 
 
@@ -187,35 +187,35 @@ class ExoLogger(Node):
         # Subscribers
         # ------------------------------------------------
         self.sub_exo_debug = self.create_subscription(
-            Float64MultiArray,
+            Float64ArrayStamped,
             "/exo_dynamics/debug",
             self.exo_debug_cb,
             50,
         )
 
         self.sub_ff_terms = self.create_subscription(
-            Float64MultiArray,
+            Float64ArrayStamped,
             "/exo_dynamics/ff_terms",
             self.ff_terms_cb,
             50,
         )
 
         self.sub_model_debug = self.create_subscription(
-            Float64MultiArray,
+            Float64ArrayStamped,
             "/exo_dynamics/model_debug",
             self.model_debug_cb,
             50,
         )
 
         self.sub_traj_debug = self.create_subscription(
-            Float64MultiArray,
+            Float64ArrayStamped,
             "/traj_ctrl/debug",
             self.traj_debug_cb,
             50,
         )
 
         self.sub_adm_debug = self.create_subscription(
-            Float64MultiArray,
+            Float64ArrayStamped,
             "/admittance/debug",
             self.adm_debug_cb,
             50,
@@ -229,7 +229,7 @@ class ExoLogger(Node):
         )
 
         self.sub_tau = self.create_subscription(
-            Float64,
+            Float64Stamped,
             "/torque",
             self.torque_cb,
             50,
@@ -249,7 +249,7 @@ class ExoLogger(Node):
     # CALLBACKS
     # ====================================================
 
-    def exo_debug_cb(self, msg: Float64MultiArray) -> None:
+    def exo_debug_cb(self, msg: Float64ArrayStamped) -> None:
         """
         Layout of /exo_dynamics/debug:
           [0]  theta
@@ -287,7 +287,7 @@ class ExoLogger(Node):
             "reaction_theta": d[14] if len(d) > 14 else math.nan,
         }
 
-    def ff_terms_cb(self, msg: Float64MultiArray) -> None:
+    def ff_terms_cb(self, msg: Float64ArrayStamped) -> None:
         """
         Layout of /exo_dynamics/ff_terms:
           [0] M_eff
@@ -303,7 +303,7 @@ class ExoLogger(Node):
             "ff_tau_pass_theta": d[3] if len(d) > 3 else math.nan,
         }
 
-    def model_debug_cb(self, msg: Float64MultiArray) -> None:
+    def model_debug_cb(self, msg: Float64ArrayStamped) -> None:
         """
         Layout of /exo_dynamics/model_debug:
           [0]  theta
@@ -341,7 +341,7 @@ class ExoLogger(Node):
             "mdl_tau_model_error": d[14] if len(d) > 14 else math.nan,
         }
 
-    def traj_debug_cb(self, msg: Float64MultiArray) -> None:
+    def traj_debug_cb(self, msg: Float64ArrayStamped) -> None:
         """
         Layout of /traj_ctrl/debug:
           [0] theta_ref
@@ -375,7 +375,7 @@ class ExoLogger(Node):
             "ctrl_tau_pass_theta": d[12] if len(d) > 12 else math.nan,
         }
 
-    def adm_debug_cb(self, msg: Float64MultiArray) -> None:
+    def adm_debug_cb(self, msg: Float64ArrayStamped) -> None:
         """
         Layout of /admittance/debug:
           [0]  theta_v
@@ -419,7 +419,7 @@ class ExoLogger(Node):
             "js_theta_dot": js_theta_dot,
         }
 
-    def torque_cb(self, msg: Float64) -> None:
+    def torque_cb(self, msg: Float64Stamped) -> None:
         self.last["torque"] = {
             "tau_cmd": float(msg.data),
         }

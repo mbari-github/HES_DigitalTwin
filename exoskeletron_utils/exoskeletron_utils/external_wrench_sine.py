@@ -23,7 +23,7 @@ ROS 2 Parameters
 import math
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float64
+from exoskeletron_safety_msgs.msg import Float64Stamped
 
 
 class TauExtSinePublisher(Node):
@@ -41,7 +41,7 @@ class TauExtSinePublisher(Node):
         topic_name   = str(self.get_parameter('topic_name').value)
         publish_rate = float(self.get_parameter('publish_rate').value)
 
-        self.publisher_ = self.create_publisher(Float64, topic_name, 10)
+        self.publisher_ = self.create_publisher(Float64Stamped, topic_name, 10)
         self.t0 = self.get_clock().now()
         self.timer = self.create_timer(1.0 / publish_rate, self.timer_callback)
 
@@ -63,7 +63,8 @@ class TauExtSinePublisher(Node):
         offset = 0.5 * (tau_max + tau_min)
         tau = offset + amp * math.sin(2.0 * math.pi * freq * t + math.pi / 2.0)
 
-        msg = Float64()
+        msg = Float64Stamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
         msg.data = tau
         self.publisher_.publish(msg)
 

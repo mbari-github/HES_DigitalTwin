@@ -18,13 +18,13 @@ Reduced equation of motion:
 
 Published topics:
     /joint_states                   sensor_msgs/JointState
-    /exo_dynamics/debug             std_msgs/Float64MultiArray
-    /exo_dynamics/ff_terms          std_msgs/Float64MultiArray
-    /exo_dynamics/tau_ext_theta     std_msgs/Float64
+    /exo_dynamics/debug             exoskeletron_safety_msgs/Float64ArrayStamped
+    /exo_dynamics/ff_terms          exoskeletron_safety_msgs/Float64ArrayStamped
+    /exo_dynamics/tau_ext_theta     exoskeletron_safety_msgs/Float64Stamped
 
 Subscribed topics:
-    /torque                                 std_msgs/Float64
-    /exo_dynamics/tau_ext_theta_override    std_msgs/Float64
+    /torque                                 exoskeletron_safety_msgs/Float64Stamped
+    /exo_dynamics/tau_ext_theta_override    exoskeletron_safety_msgs/Float64Stamped
 """
 
 import math
@@ -37,7 +37,7 @@ from scipy.optimize import least_squares
 import rclpy
 from rclpy.node import Node
 
-from std_msgs.msg import Float64, Float64MultiArray
+from exoskeletron_safety_msgs.msg import Float64Stamped, Float64ArrayStamped
 from sensor_msgs.msg import JointState
 
 
@@ -248,10 +248,10 @@ class ExoDynamicsControlTest(Node):
         # ============================================================
 
         self.sub_tau = self.create_subscription(
-            Float64, '/torque', self._torque_cb, 10
+            Float64Stamped, '/torque', self._torque_cb, 10
         )
         self.sub_tau_ext_override = self.create_subscription(
-            Float64,
+            Float64Stamped,
             '/exo_dynamics/tau_ext_theta_override',
             self._tau_ext_override_cb,
             10
@@ -259,13 +259,13 @@ class ExoDynamicsControlTest(Node):
 
         self.pub_js = self.create_publisher(JointState, '/joint_states', 10)
         self.pub_dbg = self.create_publisher(
-            Float64MultiArray, '/exo_dynamics/debug', 10
+            Float64ArrayStamped, '/exo_dynamics/debug', 10
         )
         self.pub_ff_terms = self.create_publisher(
-            Float64MultiArray, '/exo_dynamics/ff_terms', 10
+            Float64ArrayStamped, '/exo_dynamics/ff_terms', 10
         )
         self.pub_tau_ext_theta = self.create_publisher(
-            Float64, '/exo_dynamics/tau_ext_theta', 10
+            Float64Stamped, '/exo_dynamics/tau_ext_theta', 10
         )
 
         # ============================================================
@@ -298,10 +298,10 @@ class ExoDynamicsControlTest(Node):
     # CALLBACKS
     # ============================================================
 
-    def _torque_cb(self, msg: Float64) -> None:
+    def _torque_cb(self, msg: Float64Stamped) -> None:
         self.tau_m = float(msg.data)
 
-    def _tau_ext_override_cb(self, msg: Float64) -> None:
+    def _tau_ext_override_cb(self, msg: Float64Stamped) -> None:
         self._tau_ext_override_value = float(msg.data)
 
     # ============================================================
@@ -756,7 +756,8 @@ class ExoDynamicsControlTest(Node):
         self.pub_js.publish(js)
 
         # --- /exo_dynamics/debug ---
-        dbg = Float64MultiArray()
+        dbg = Float64ArrayStamped()
+        dbg.header.stamp = self.get_clock().now().to_msg()
         dbg.data = [
             float(self.theta),
             float(self.theta_dot),
@@ -780,7 +781,8 @@ class ExoDynamicsControlTest(Node):
         self.pub_dbg.publish(dbg)
 
         # --- /exo_dynamics/ff_terms ---
-        ff = Float64MultiArray()
+        ff = Float64ArrayStamped()
+        ff.header.stamp = self.get_clock().now().to_msg()
         ff.data = [
             float(self.denom_last),
             float(self.proj_last),
@@ -790,7 +792,8 @@ class ExoDynamicsControlTest(Node):
         self.pub_ff_terms.publish(ff)
 
         # --- /exo_dynamics/tau_ext_theta ---
-        msg_tau = Float64()
+        msg_tau = Float64Stamped()
+        msg_tau.header.stamp = self.get_clock().now().to_msg()
         msg_tau.data = float(self.tau_ext_theta)
         self.pub_tau_ext_theta.publish(msg_tau)
 

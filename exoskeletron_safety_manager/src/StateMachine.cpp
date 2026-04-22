@@ -78,7 +78,7 @@ void StateMachine::initialize()
 
   // ── Subscription for downgrade + liveness + coherence checks ─────
   bridge_status_sub_ =
-    this->create_subscription<std_msgs::msg::Float64MultiArray>(
+    this->create_subscription<exoskeletron_safety_msgs::msg::Float64ArrayStamped>(
       "/exo_bridge/status", 10,
       std::bind(&StateMachine::bridge_status_callback, this,
         std::placeholders::_1));
@@ -458,7 +458,7 @@ void StateMachine::reset_safety_callback(
 // and only runs in COMPLIANT or TORQUE_LIMIT states.
 
 void StateMachine::bridge_status_callback(
-  const std_msgs::msg::Float64MultiArray::SharedPtr msg)
+  const exoskeletron_safety_msgs::msg::Float64ArrayStamped::SharedPtr msg)
 {
   if (msg->data.size() < 9) return;
 

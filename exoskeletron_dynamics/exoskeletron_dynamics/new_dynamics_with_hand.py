@@ -29,7 +29,7 @@ from scipy.optimize import least_squares
 import rclpy
 from rclpy.node import Node
 
-from std_msgs.msg import Float64, Float64MultiArray
+from exoskeletron_safety_msgs.msg import Float64Stamped, Float64ArrayStamped
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import WrenchStamped, Point
 from visualization_msgs.msg import Marker
@@ -299,7 +299,7 @@ class ExoReducedDynamicsWithHand(Node):
         # ROS I/O
         # ============================================================
 
-        self.sub_tau = self.create_subscription(Float64, '/torque', self.torque_cb, 10)
+        self.sub_tau = self.create_subscription(Float64Stamped, '/torque', self.torque_cb, 10)
         if self.wrench_enable:
             self.sub_wrench = self.create_subscription(
                 WrenchStamped, self.wrench_topic, self.wrench_cb, 10
@@ -307,10 +307,10 @@ class ExoReducedDynamicsWithHand(Node):
 
         self.pub_js = self.create_publisher(JointState, '/joint_states', 10)
         #self.pub_closed = self.create_publisher(JointState, '/joint_states_closed', 10)
-        self.pub_dbg = self.create_publisher(Float64MultiArray, '/exo_dynamics/debug', 10)
-        self.pub_ff_terms = self.create_publisher(Float64MultiArray, '/exo_dynamics/ff_terms', 10)
-        self.pub_tau_ext_theta = self.create_publisher(Float64, '/exo_dynamics/tau_ext_theta', 10)
-        self.pub_model_dbg = self.create_publisher( Float64MultiArray, '/exo_dynamics/model_debug', 10)
+        self.pub_dbg = self.create_publisher(Float64ArrayStamped, '/exo_dynamics/debug', 10)
+        self.pub_ff_terms = self.create_publisher(Float64ArrayStamped, '/exo_dynamics/ff_terms', 10)
+        self.pub_tau_ext_theta = self.create_publisher(Float64Stamped, '/exo_dynamics/tau_ext_theta', 10)
+        self.pub_model_dbg = self.create_publisher(Float64ArrayStamped, '/exo_dynamics/model_debug', 10)
 
         if self.ce_force_enable:
             self.pub_ce_force = self.create_publisher(WrenchStamped, '/ce_force', 10)
@@ -345,7 +345,7 @@ class ExoReducedDynamicsWithHand(Node):
     # CALLBACKS
     # ============================================================
 
-    def torque_cb(self, msg: Float64) -> None:
+    def torque_cb(self, msg: Float64Stamped) -> None:
         self.tau_m = float(msg.data)
 
     def wrench_cb(self, msg: WrenchStamped) -> None:
@@ -925,7 +925,8 @@ class ExoReducedDynamicsWithHand(Node):
         # self.pub_closed.publish(js2)
 
         # --- /exo_dynamics/debug ---
-        dbg = Float64MultiArray()
+        dbg = Float64ArrayStamped()
+        dbg.header.stamp = self.get_clock().now().to_msg()
         dbg.data = [
             float(self.theta),
             float(self.theta_dot),
@@ -946,7 +947,8 @@ class ExoReducedDynamicsWithHand(Node):
         self.pub_dbg.publish(dbg)
 
         # --- /exo_dynamics/ff_terms ---
-        ff = Float64MultiArray()
+        ff = Float64ArrayStamped()
+        ff.header.stamp = self.get_clock().now().to_msg()
         ff.data = [
             float(self.denom_last),
             float(self.proj_last),
@@ -972,7 +974,8 @@ class ExoReducedDynamicsWithHand(Node):
         # [12] dyn_residual
         # [13] tau_model
         # [14] tau_model_error
-        model_dbg = Float64MultiArray()
+        model_dbg = Float64ArrayStamped()
+        model_dbg.header.stamp = self.get_clock().now().to_msg()
         model_dbg.data = [
             float(self.theta),
             float(self.theta_dot),
@@ -993,7 +996,8 @@ class ExoReducedDynamicsWithHand(Node):
         self.pub_model_dbg.publish(model_dbg)
 
         # --- /exo_dynamics/tau_ext_theta ---
-        msg_tau_ext = Float64()
+        msg_tau_ext = Float64Stamped()
+        msg_tau_ext.header.stamp = self.get_clock().now().to_msg()
         msg_tau_ext.data = float(self.tau_ext_theta)
         self.pub_tau_ext_theta.publish(msg_tau_ext)
 

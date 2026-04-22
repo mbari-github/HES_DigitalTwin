@@ -55,21 +55,22 @@ class TestExoBridgeIntegration(unittest.TestCase):
 
     def setUp(self):
         from rclpy.node import Node as RclpyNode
-        from std_msgs.msg import Float64, Float64MultiArray, String, Bool
+        from std_msgs.msg import String, Bool
         from std_srvs.srv import SetBool
         from sensor_msgs.msg import JointState
         from exoskeletron_safety_msgs.srv import SetMode
+        from exoskeletron_safety_msgs.msg import Float64Stamped, Float64ArrayStamped
 
         self.node = RclpyNode('bridge_test')
 
         self.pub_js = self.node.create_publisher(
             JointState, '/joint_states', 10)
         self.pub_traj = self.node.create_publisher(
-            Float64MultiArray, '/trajectory_ref_raw', 10)
+            Float64ArrayStamped, '/trajectory_ref_raw', 10)
         self.pub_tau = self.node.create_publisher(
-            Float64, '/torque_raw', 10)
+            Float64Stamped, '/torque_raw', 10)
         self.pub_ext = self.node.create_publisher(
-            Float64, '/exo_dynamics/tau_ext_theta', 10)
+            Float64Stamped, '/exo_dynamics/tau_ext_theta', 10)
 
         self.last_status = None
         self.last_mode = None
@@ -77,13 +78,13 @@ class TestExoBridgeIntegration(unittest.TestCase):
         self.last_freeze = None
 
         self.node.create_subscription(
-            Float64MultiArray, '/exo_bridge/status',
+            Float64ArrayStamped, '/exo_bridge/status',
             lambda m: setattr(self, 'last_status', list(m.data)), 10)
         self.node.create_subscription(
             String, '/exo_bridge/mode',
             lambda m: setattr(self, 'last_mode', m.data), 10)
         self.node.create_subscription(
-            Float64, '/torque',
+            Float64Stamped, '/torque',
             lambda m: setattr(self, 'last_torque_out', m.data), 10)
         self.node.create_subscription(
             Bool, '/admittance/freeze',
@@ -128,26 +129,31 @@ class TestExoBridgeIntegration(unittest.TestCase):
         return fut.result()
 
     def _pub_all(self, tau=1.0, theta=0.5, theta_dot=0.1):
-        from std_msgs.msg import Float64, Float64MultiArray
         from sensor_msgs.msg import JointState
+        from exoskeletron_safety_msgs.msg import Float64Stamped, Float64ArrayStamped
+
+        stamp = self.node.get_clock().now().to_msg()
 
         js = JointState()
-        js.header.stamp = self.node.get_clock().now().to_msg()
+        js.header.stamp = stamp
         js.name = ['rev_crank']
         js.position = [theta]
         js.velocity = [theta_dot]
         js.effort = [0.0]
         self.pub_js.publish(js)
 
-        traj = Float64MultiArray()
+        traj = Float64ArrayStamped()
+        traj.header.stamp = stamp
         traj.data = [theta, theta_dot, 0.0]
         self.pub_traj.publish(traj)
 
-        tau_msg = Float64()
+        tau_msg = Float64Stamped()
+        tau_msg.header.stamp = stamp
         tau_msg.data = tau
         self.pub_tau.publish(tau_msg)
 
-        ext_msg = Float64()
+        ext_msg = Float64Stamped()
+        ext_msg.header.stamp = stamp
         ext_msg.data = 0.0
         self.pub_ext.publish(ext_msg)
 
@@ -300,22 +306,26 @@ class TestExoBridgeIntegration(unittest.TestCase):
             self._pub_all()
             self._spin(0.05)
 
-        from std_msgs.msg import Float64, Float64MultiArray
         from sensor_msgs.msg import JointState
+        from exoskeletron_safety_msgs.msg import Float64Stamped, Float64ArrayStamped
         for _ in range(30):
+            stamp = self.node.get_clock().now().to_msg()
+
             js = JointState()
-            js.header.stamp = self.node.get_clock().now().to_msg()
+            js.header.stamp = stamp
             js.name = ['rev_crank']
             js.position = [0.5]
             js.velocity = [0.1]
             js.effort = [0.0]
             self.pub_js.publish(js)
 
-            traj = Float64MultiArray()
+            traj = Float64ArrayStamped()
+            traj.header.stamp = stamp
             traj.data = [0.5, 0.1, 0.0]
             self.pub_traj.publish(traj)
 
-            ext = Float64()
+            ext = Float64Stamped()
+            ext.header.stamp = stamp
             ext.data = 0.0
             self.pub_ext.publish(ext)
 

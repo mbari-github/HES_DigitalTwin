@@ -66,11 +66,11 @@ On transition stop → any other mode:
 Topics
 ------
   Sub:  /joint_states             sensor_msgs/JointState
-        /trajectory_ref           std_msgs/Float64MultiArray
-        /exo_dynamics/ff_terms    std_msgs/Float64MultiArray
+        /trajectory_ref           exoskeletron_safety_msgs/Float64ArrayStamped
+        /exo_dynamics/ff_terms    exoskeletron_safety_msgs/Float64ArrayStamped
         /exo_bridge/mode          std_msgs/String
-  Pub:  /torque                   std_msgs/Float64
-        /traj_ctrl/debug          std_msgs/Float64MultiArray
+  Pub:  /torque                   exoskeletron_safety_msgs/Float64Stamped
+        /traj_ctrl/debug          exoskeletron_safety_msgs/Float64ArrayStamped
 
 ROS2 Parameters
 ---------------
@@ -87,7 +87,8 @@ ROS2 Parameters
 import rclpy
 from rclpy.node import Node
 
-from std_msgs.msg import Float64, Float64MultiArray, String
+from std_msgs.msg import String
+from exoskeletron_safety_msgs.msg import Float64Stamped, Float64ArrayStamped
 from sensor_msgs.msg import JointState
 
 
@@ -142,15 +143,15 @@ class TrajectoryController(Node):
         self.create_subscription(
             JointState, '/joint_states', self._js_cb, 10)
         self.create_subscription(
-            Float64MultiArray, '/trajectory_ref', self._ref_cb, 10)
+            Float64ArrayStamped, '/trajectory_ref', self._ref_cb, 10)
         self.create_subscription(
-            Float64MultiArray, '/exo_dynamics/ff_terms', self._ff_terms_cb, 10)
+            Float64ArrayStamped, '/exo_dynamics/ff_terms', self._ff_terms_cb, 10)
         self.create_subscription(
             String, '/exo_bridge/mode', self._bridge_mode_cb, 10)
 
         # ── Publishers ───────────────────────────────────────────────
-        self.pub_tau  = self.create_publisher(Float64,           '/torque',          10)
-        self.pub_diag = self.create_publisher(Float64MultiArray, '/traj_ctrl/debug', 10)
+        self.pub_tau  = self.create_publisher(Float64Stamped,      '/torque',          10)
+        self.pub_diag = self.create_publisher(Float64ArrayStamped, '/traj_ctrl/debug', 10)
 
         self.timer = self.create_timer(1.0 / publish_rate, self._control_loop)
 
@@ -176,14 +177,14 @@ class TrajectoryController(Node):
             self.theta_dot = float(msg.velocity[idx])
         self.js_received = True
 
-    def _ref_cb(self, msg: Float64MultiArray):
+    def _ref_cb(self, msg: Float64ArrayStamped):
         d = msg.data
         self.theta_ref      = float(d[0]) if len(d) > 0 else 0.0
         self.theta_dot_ref  = float(d[1]) if len(d) > 1 else 0.0
         self.theta_ddot_ref = float(d[2]) if len(d) > 2 else 0.0
         self.ref_received   = True
 
-    def _ff_terms_cb(self, msg: Float64MultiArray):
+    def _ff_terms_cb(self, msg: Float64ArrayStamped):
         """
         Layout of /exo_dynamics/ff_terms:
           [0] denom  = M_eff = B^T M B + Jm
@@ -252,11 +253,14 @@ class TrajectoryController(Node):
             tau_clamped = float(max(-tau_max, min(tau_max, tau_raw)))
             self.tau_out = tau_clamped
 
-            msg_tau = Float64()
+            stamp = self.get_clock().now().to_msg()
+            msg_tau = Float64Stamped()
+            msg_tau.header.stamp = stamp
             msg_tau.data = tau_clamped
             self.pub_tau.publish(msg_tau)
 
-            diag = Float64MultiArray()
+            diag = Float64ArrayStamped()
+            diag.header.stamp = stamp
             diag.data = [
                 self.theta_ref,
                 self.theta,
@@ -316,11 +320,14 @@ class TrajectoryController(Node):
         tau_clamped = float(max(-tau_max, min(tau_max, tau_raw)))
         self.tau_out = tau_clamped
 
-        msg_tau = Float64()
+        stamp = self.get_clock().now().to_msg()
+        msg_tau = Float64Stamped()
+        msg_tau.header.stamp = stamp
         msg_tau.data = tau_clamped
         self.pub_tau.publish(msg_tau)
 
-        diag = Float64MultiArray()
+        diag = Float64ArrayStamped()
+        diag.header.stamp = stamp
         diag.data = [
             self.theta_ref,
             self.theta,

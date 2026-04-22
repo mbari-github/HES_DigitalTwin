@@ -38,11 +38,11 @@ Block diagram
 
 Topics
 ------
-  Sub:  /exo_dynamics/tau_ext_theta   std_msgs/Float64
+  Sub:  /exo_dynamics/tau_ext_theta   exoskeletron_safety_msgs/Float64Stamped
         /joint_states                 sensor_msgs/JointState
         /admittance/freeze            std_msgs/Bool
-  Pub:  /trajectory_ref               std_msgs/Float64MultiArray  [θ_ref, θ̇_ref, θ̈_ref]
-        /admittance/debug             std_msgs/Float64MultiArray
+  Pub:  /trajectory_ref               exoskeletron_safety_msgs/Float64ArrayStamped  [θ_ref, θ̇_ref, θ̈_ref]
+        /admittance/debug             exoskeletron_safety_msgs/Float64ArrayStamped
 
 Virtual wall (position barrier)
 --------------------------------
@@ -80,7 +80,8 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 
-from std_msgs.msg import Float64, Float64MultiArray, Bool
+from std_msgs.msg import Bool
+from exoskeletron_safety_msgs.msg import Float64Stamped, Float64ArrayStamped
 from sensor_msgs.msg import JointState
 
 
@@ -134,7 +135,7 @@ class AdmittanceController(Node):
 
         # ── Subscribers ──────────────────────────────────────────────
         self.sub_force = self.create_subscription(
-            Float64,
+            Float64Stamped,
             '/exo_dynamics/tau_ext_theta',
             self._force_cb,
             10
@@ -153,8 +154,8 @@ class AdmittanceController(Node):
             10
         )
 
-        self.pub_ref  = self.create_publisher(Float64MultiArray, '/trajectory_ref', 10)
-        self.pub_diag = self.create_publisher(Float64MultiArray, '/admittance/debug', 10)
+        self.pub_ref  = self.create_publisher(Float64ArrayStamped, '/trajectory_ref', 10)
+        self.pub_diag = self.create_publisher(Float64ArrayStamped, '/admittance/debug', 10)
 
         self.timer = self.create_timer(self._dt, self._control_loop)
 
@@ -192,7 +193,7 @@ class AdmittanceController(Node):
                     f"theta_v initialized from /joint_states: {self.theta_v:.4f} rad"
                 )
 
-    def _force_cb(self, msg: Float64):
+    def _force_cb(self, msg: Float64Stamped):
         self.tau_ext_theta = float(msg.data)
         self.force_received = True
 
@@ -245,7 +246,8 @@ class AdmittanceController(Node):
         # Still publish the frozen reference to keep the topic alive
         # (prevents the trajectory controller watchdog from triggering).
         if self._frozen:
-            ref = Float64MultiArray()
+            ref = Float64ArrayStamped()
+            ref.header.stamp = self.get_clock().now().to_msg()
             ref.data = [float(self.theta_v), 0.0, 0.0]
             self.pub_ref.publish(ref)
             return
@@ -317,7 +319,9 @@ class AdmittanceController(Node):
             self.theta_dot_v  = max(self.theta_dot_v, 0.0)
             self.theta_ddot_v = max(self.theta_ddot_v, 0.0)
 
-        ref = Float64MultiArray()
+        stamp = self.get_clock().now().to_msg()
+        ref = Float64ArrayStamped()
+        ref.header.stamp = stamp
         ref.data = [
             float(self.theta_v),
             float(self.theta_dot_v),
@@ -325,7 +329,8 @@ class AdmittanceController(Node):
         ]
         self.pub_ref.publish(ref)
 
-        diag = Float64MultiArray()
+        diag = Float64ArrayStamped()
+        diag.header.stamp = stamp
         diag.data = [
             float(self.theta_v),
             float(self.theta_dot_v),

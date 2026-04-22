@@ -77,7 +77,7 @@ void FaultMonitorMode::initialize(const rclcpp::Node::SharedPtr & node)
     grace_period_seconds_);
 
   // ---- Subscriber and service clients ----
-  bridge_status_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
+  bridge_status_sub_ = node_->create_subscription<exoskeletron_safety_msgs::msg::Float64ArrayStamped>(
     "/exo_bridge/status",
     10,
     std::bind(&FaultMonitorMode::bridge_status_callback, this, std::placeholders::_1));
@@ -205,7 +205,7 @@ FaultResponseLevel FaultMonitorMode::debounced_entry_level() const
 // ============================================================
 
 void FaultMonitorMode::bridge_status_callback(
-  const std_msgs::msg::Float64MultiArray::SharedPtr msg)
+  const exoskeletron_safety_msgs::msg::Float64ArrayStamped::SharedPtr msg)
 {
   if (!node_ || msg->data.size() < 9) return;
 

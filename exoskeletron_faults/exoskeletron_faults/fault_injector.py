@@ -59,23 +59,23 @@ topic remapping in the launch file:
 Topics
 ------
   CHANNEL 0:
-    Sub:  /exo_dynamics/tau_ext_theta         std_msgs/Float64
-    Pub:  /exo_dynamics/tau_ext_theta_faulted std_msgs/Float64
+    Sub:  /exo_dynamics/tau_ext_theta         exoskeletron_safety_msgs/Float64Stamped
+    Pub:  /exo_dynamics/tau_ext_theta_faulted exoskeletron_safety_msgs/Float64Stamped
 
   CHANNEL 1:
-    Sub:  /trajectory_ref                     std_msgs/Float64MultiArray
-    Pub:  /trajectory_ref_faulted             std_msgs/Float64MultiArray
+    Sub:  /trajectory_ref                     exoskeletron_safety_msgs/Float64ArrayStamped
+    Pub:  /trajectory_ref_faulted             exoskeletron_safety_msgs/Float64ArrayStamped
 
   CHANNEL 2:
-    Sub:  /torque                             std_msgs/Float64
-    Pub:  /torque_faulted                     std_msgs/Float64
+    Sub:  /torque                             exoskeletron_safety_msgs/Float64Stamped
+    Pub:  /torque_faulted                     exoskeletron_safety_msgs/Float64Stamped
 
   CHANNEL 3:
     Sub:  /joint_states                       sensor_msgs/JointState
     Pub:  /joint_states_faulted               sensor_msgs/JointState
 
   Always:
-    Pub:  /fault_injector/status              std_msgs/Float64MultiArray
+    Pub:  /fault_injector/status              exoskeletron_safety_msgs/Float64ArrayStamped
           Layout: [channel, fault_type_id, fault_active, fault_magnitude,
                    n_injections, last_raw, last_faulted, delta]
 
@@ -119,7 +119,7 @@ import numpy as np
 import rclpy
 
 from rclpy.node import Node
-from std_msgs.msg import Float64, Float64MultiArray
+from exoskeletron_safety_msgs.msg import Float64Stamped, Float64ArrayStamped
 from sensor_msgs.msg import JointState
 
 
@@ -143,21 +143,21 @@ CHANNEL_INFO = {
         'name': 'tau_ext_theta',
         'sub_topic': '/exo_dynamics/tau_ext_theta',
         'pub_topic': '/exo_dynamics/tau_ext_theta_faulted',
-        'msg_type': 'Float64',
+        'msg_type': 'Float64Stamped',
         'description': 'User force projected onto theta (force sensor)',
     },
     1: {
         'name': 'trajectory_ref',
         'sub_topic': '/trajectory_ref',
         'pub_topic': '/trajectory_ref_faulted',
-        'msg_type': 'Float64MultiArray',
+        'msg_type': 'Float64ArrayStamped',
         'description': 'Trajectory reference [theta_ref, theta_dot_ref, theta_ddot_ref]',
     },
     2: {
         'name': 'torque',
         'sub_topic': '/torque',
         'pub_topic': '/torque_faulted',
-        'msg_type': 'Float64',
+        'msg_type': 'Float64Stamped',
         'description': 'Actuated torque (inner loop / finger)',
     },
     3: {
@@ -216,15 +216,15 @@ class FaultInjector(Node):
         # ============================================================
         # ROS I/O — subscriber and publisher depend on the channel type
         # ============================================================
-        if self._ch_info['msg_type'] == 'Float64':
+        if self._ch_info['msg_type'] == 'Float64Stamped':
             self._sub = self.create_subscription(
-                Float64,
+                Float64Stamped,
                 self._ch_info['sub_topic'],
                 self._cb_float64,
                 10
             )
             self._pub = self.create_publisher(
-                Float64,
+                Float64Stamped,
                 self._ch_info['pub_topic'],
                 10
             )
@@ -242,21 +242,21 @@ class FaultInjector(Node):
                 10
             )
 
-        else:
+        else:  # Float64ArrayStamped
             self._sub = self.create_subscription(
-                Float64MultiArray,
+                Float64ArrayStamped,
                 self._ch_info['sub_topic'],
                 self._cb_multiarray,
                 10
             )
             self._pub = self.create_publisher(
-                Float64MultiArray,
+                Float64ArrayStamped,
                 self._ch_info['pub_topic'],
                 10
             )
 
         self._pub_status = self.create_publisher(
-            Float64MultiArray,
+            Float64ArrayStamped,
             '/fault_injector/status',
             10
         )
@@ -320,9 +320,9 @@ class FaultInjector(Node):
     # CALLBACKS — message reception
     # ============================================================
 
-    def _cb_float64(self, msg: Float64):
+    def _cb_float64(self, msg: Float64Stamped):
         """
-        Callback for Float64 channels (tau_ext_theta, torque).
+        Callback for Float64Stamped channels (tau_ext_theta, torque).
         If hard freeze is active, nothing is published on the faulted topic.
         """
         self._reset_transient_states_if_needed()
@@ -348,13 +348,14 @@ class FaultInjector(Node):
         faulted_val = self._apply_fault_scalar(raw_val)
         self._last_faulted = faulted_val
 
-        out = Float64()
+        out = Float64Stamped()
+        out.header.stamp = self.get_clock().now().to_msg()
         out.data = faulted_val
         self._pub.publish(out)
 
-    def _cb_multiarray(self, msg: Float64MultiArray):
+    def _cb_multiarray(self, msg: Float64ArrayStamped):
         """
-        Callback for Float64MultiArray channel (trajectory_ref).
+        Callback for Float64ArrayStamped channel (trajectory_ref).
         If hard freeze is active, nothing is published on the faulted topic.
         """
         self._reset_transient_states_if_needed()
@@ -391,7 +392,8 @@ class FaultInjector(Node):
 
         data[target_idx] = faulted_val
 
-        out = Float64MultiArray()
+        out = Float64ArrayStamped()
+        out.header.stamp = self.get_clock().now().to_msg()
         out.data = data
         self._pub.publish(out)
 
@@ -530,7 +532,7 @@ class FaultInjector(Node):
         """
         Publish fault injector state on /fault_injector/status.
 
-        Float64MultiArray layout:
+        Float64ArrayStamped layout:
           [0]  channel
           [1]  fault_type_id
           [2]  fault_active (1.0 / 0.0)
@@ -545,7 +547,8 @@ class FaultInjector(Node):
 
         delta = self._last_faulted - self._last_raw
 
-        msg = Float64MultiArray()
+        msg = Float64ArrayStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
         msg.data = [
             float(self._channel),
             fault_type_id,
