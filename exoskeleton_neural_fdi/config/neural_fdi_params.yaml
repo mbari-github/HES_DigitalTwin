@@ -1,0 +1,57 @@
+neural_fdi_node:
+  ros__parameters:
+
+    # ── Target joint ────────────────────────────────────────
+    joint_name: rev_crank
+
+    # ── Phase 1: Data Collection ────────────────────────────
+    # Duration of healthy data collection (seconds).
+    # At 200 Hz this gives collect_duration * 200 samples.
+    # Minimum recommended: 30s for basic testing, 60-120s for
+    # robust training with varied operating conditions.
+    collect_duration: 60.0
+
+    # Directory for CSV data and trained model weights.
+    # Tilde (~) is expanded to the user's home directory.
+    data_dir: "~/neural_fdi_data"
+
+    # Skip phases if data/models already exist:
+    #   skip_collect: true  → skip COLLECT, go to TRAIN (requires CSV)
+    #   skip_train:   true  → skip COLLECT+TRAIN, go to INFERENCE (requires .pt)
+    skip_collect: false
+    skip_train: false
+
+    # ── Phase 2: Training ───────────────────────────────────
+    # GRU architecture
+    window_size: 50       # Input window (samples). 50 = 250ms at 200Hz.
+                          # Must cover the closed-loop propagation delay
+                          # (~100-300ms) to capture cross-correlation patterns.
+    hidden_size: 32       # GRU hidden units. 32 is sufficient for a 1-DOF
+                          # system; increase to 64 only if underfitting.
+    num_layers: 2         # Stacked GRU layers. 2 gives good capacity
+                          # without excessive depth.
+
+    # Training hyperparameters
+    max_epochs: 200       # Maximum epochs (early stopping usually triggers
+                          # well before this).
+    batch_size: 64        # Batch size. 64 is a good default; increase to
+                          # 128-256 if you have > 100s of data.
+    learning_rate: 0.001  # Initial learning rate for AdamW.
+
+    # ── Phase 3: Inference ──────────────────────────────────
+    # Adaptive thresholding: threshold = mean + sigma_multiplier * std
+    # Computed on the absolute residual during healthy operation.
+    sigma_multiplier: 5.0   # 5σ gives very low false positive rate.
+                            # Decrease to 3-4 for higher sensitivity,
+                            # increase to 6-7 for fewer false alarms.
+
+    # Warmup: number of inference samples before detection is active.
+    # During warmup, residual statistics are accumulated but no
+    # fault decision is made. Must be > window_size.
+    warmup_samples: 200     # 200 samples = 1 second at 200Hz
+
+    # Persistence: consecutive threshold violations required to
+    # confirm a fault. Prevents transient spikes from triggering
+    # false alarms. Acts as a debounce mechanism, similar to the
+    # FaultMonitorMode plugin's debounce_count.
+    persistence_count: 10   # 10 samples = 50ms at 200Hz
