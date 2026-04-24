@@ -39,22 +39,30 @@ from rclpy.node import Node
 
 from exoskeleton_safety_msgs.msg import Float64Stamped, Float64ArrayStamped
 from sensor_msgs.msg import JointState
-
+import os
+from ament_index_python.packages import get_package_share_directory
 
 class ExoDynamicsControlTest(Node):
 
     def __init__(self) -> None:
         super().__init__('exo_dynamics_control_test')
+        try:
+            package_share_dir = get_package_share_directory('exoskeleton_description')
+            default_urdf_path = os.path.join(
+                package_share_dir, 
+                'urdf', 
+                'assembly_with_hand.urdf'
+            )
+        except Exception as e:
+            self.get_logger().error(f"Impossibile trovare il pacchetto: {e}")
+            default_urdf_path = ""
 
         # ============================================================
         # ROS 2 PARAMETERS
         # ============================================================
 
-        self.declare_parameter(
-            'urdf_path',
-            '/home/mbari/ros2_ws/src/HES_DigitalTwin/'
-            'exoskeleton_description/urdf/assembly_with_hand.urdf'
-        )
+        self.declare_parameter('urdf_path', default_urdf_path)
+        
         self.declare_parameter('dt', 0.001)
         self.declare_parameter('publish_dt', 0.005)
         self.declare_parameter('theta_init', 0.0)
