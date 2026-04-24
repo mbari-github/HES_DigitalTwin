@@ -25,38 +25,51 @@ Digital Twin ROS 2 di un esoscheletro per la riabilitazione della mano (Hand Exo
 
 ## Docker
 
-Il modo più rapido per avere l'ambiente completo (Ubuntu 24.04, ROS 2 Jazzy, Pinocchio, NumPy, SciPy) è usare il `Dockerfile` incluso nella root del repository. [NON E' ANCORA STATO TESTATO, DOVREBBE FUNZIONARE]
+Il progetto include un `Dockerfile` ottimizzato basato su **ROS 2 Jazzy** (Ubuntu 24.04 Noble) che integra tutte le dipendenze necessarie, inclusi **Pinocchio** (via robotpkg), NumPy, SciPy e le utility grafiche.
 
-### Build dell'immagine
-
+### 1. Build dell'immagine
+Dalla root del repository, compila l'immagine assegnandole un tag:
 ```bash
-# Dalla root del repository
+docker build -t hes_digital_twin .
+```
+### 2. Avvio del container
+Per il corretto funzionamento di RViz2 e delle GUI Python (Tkinter), è necessario fornire al container l'accesso al server X dell'host e l'accelerazione hardware per la GPU.
+#### Configurazione iniziale (solo la prima volta per sessione):
+```bash
 docker build -t hes_digital_twin .
 ```
 
-### Avvio del container
-
-**Solo terminale (headless):**
-
+#### Esecuzione con supporto GPU (Consigliata):
+Utilizza questo comando per abilitare l'accelerazione grafica (fondamentale per la fluidità di RViz) e mappare i dispositivi video:
 ```bash
-docker run -it --rm hes_digital_twin
+sudo docker run -it --rm \
+  --net=host \
+  --env="DISPLAY" \
+  --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
+  --device="/dev/dri:/dev/dri" \
+  hes_digital_twin
 ```
-
-**Con supporto GUI** (RViz2, GUI Tkinter — richiede X11):
-
+#### Esecuzione per Sviluppo (Mount del codice):
+Utilizza questo comando se desideri modificare il codice sul tuo PC (es. tramite VS Code) e vedere i cambiamenti riflessi istantaneamente nel container senza dover rifare la build:
 ```bash
-xhost +local:docker
-docker run -it --rm \
-  --env DISPLAY=$DISPLAY \
-  --volume /tmp/.X11-unix:/tmp/.X11-unix \
+sudo docker run -it --rm \
+  --net=host \
+  --env="DISPLAY" \
+  --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
+  --volume="$(pwd):/ros2_ws/src/HES_DigitalTwin" \
+  --device="/dev/dri:/dev/dri" \
   hes_digital_twin
 ```
 
-All'interno del container il workspace è già compilato e sourced. È possibile avviare direttamente i launch file:
-
+### 3. Utilizzo
+Una volta all'interno del container, il workspace è già compilato e sourced. Puoi avviare direttamente lo stack:
 ```bash
-ros2 launch exoskeleton_bringup testing.launch.py
+ros2 launch exoskeleton_bringup full_sim.launch.py
 ```
+Se RViz dovesse mostrare errori relativi ai driver grafici nonostante il flag --device, prova ad aggiungere --env="LIBGL_ALWAYS_SOFTWARE=1" al comando di run per forzare il rendering via CPU (più lento ma compatibile).
+
+
+
 
 ---
 
