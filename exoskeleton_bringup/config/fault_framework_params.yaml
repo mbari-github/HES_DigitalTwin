@@ -1,39 +1,73 @@
+# exoskeleton_bringup/config/fault_framework_params.yaml
+#
+# Configurazione del FaultFramework per test con bias_drift su channel 0
+# (sensore forza / tau_ext_theta).
+#
+# Pipeline attiva: bias_drift
+#   - Simula una deriva lenta del sensore di forza causata da
+#     temperatura, calibrazione che si sposta, o creep meccanico.
+#   - Il bias aumenta di ~0.001 Nm per campione (random walk Gaussiano).
+#   - A 200 Hz, dopo 10 secondi ci si aspetta una deriva di circa
+#     ±0.2 Nm (std del random walk = 0.001 * sqrt(2000) ≈ 0.045 Nm)
+#
+# Per aggiungere stadi: estendere fault_pipeline_config, es:
+#   [{"type":"bias_drift","std":0.001}, {"type":"noise","std":0.005}]
+#
+# Attivare a runtime (dopo aver lanciato il sistema):
+#   ros2 param set /fault_injector fault_active true
+#
+# Cambiare pipeline a runtime (stati transienti resettati automaticamente):
+#   ros2 param set /fault_injector fault_pipeline_config \
+#     '[{"type":"offset","magnitude":0.5}]'
+#
+# Monitorare:
+#   ros2 topic echo /fault_injector/status
+#   ros2 topic echo /observer/momentum_residual
+
 fault_injector:
   ros__parameters:
 
-    # ======================
-    # Core
-    # ======================
-    channel: 2
-    fault_active: true
+    # ── Canale ───────────────────────────────────────────────────────
+    # 0 = /exo_dynamics/tau_ext_theta  (sensore forza)
+    # 3 = /joint_states                (encoder)
+    channel: 0
 
-    # ======================
-    # Pipeline (JSON string)
-    # ======================
+    # ── Fault disattivo all'avvio ────────────────────────────────────
+    # Attivare dopo che il sistema si è stabilizzato (~5s):
+    #   ros2 param set /fault_injector fault_active true
+    fault_active: false
+
+    # ── Pipeline ─────────────────────────────────────────────────────
+    # Singolo stadio: bias_drift
+    #
+    # std: deviazione standard dell'incremento del bias per campione [Nm]
+    #   0.0005 → deriva molto lenta  (~0.02 Nm dopo 10s)
+    #   0.001  → deriva media        (~0.04 Nm dopo 10s)
+    #   0.005  → deriva veloce       (~0.22 Nm dopo 10s)
+    #
+    # Il bias è accumulato come random walk:
+    #   bias(t) = bias(t-1) + N(0, std)
+    # Non ha limite superiore: il fault peggiora nel tempo finché
+    # non viene disattivato o la pipeline non viene resettata.
     fault_pipeline_config: >
       [
         {
           "type": "bias_drift",
-          "std": 0.0005
-        },
-        {
-          "type": "noise",
-          "std": 0.01
-        },
-        {
-          "type": "quantization",
-          "resolution": 0.005
+          "std": 0.001
         }
       ]
 
-    # ======================
-    # Channel-specific
-    # ======================
-    target_index: 0
-    joint_name: "rev_crank"
-    fault_js_field: "position"
+    # ── Parametri legacy (fallback se pipeline è vuota) ──────────────
+    # Non usati quando fault_pipeline_config è valido.
+    fault_type:       'offset'
+    fault_magnitude:  1.0
+    noise_std:        0.1
+    spike_duration:   0.05
 
-    # ======================
-    # Timing
-    # ======================
+    # ── Channel-specific ─────────────────────────────────────────────
+    target_index:   0
+    joint_name:     'rev_crank'
+    fault_js_field: 'position'
+
+    # ── Timing ───────────────────────────────────────────────────────
     publish_rate: 200.0

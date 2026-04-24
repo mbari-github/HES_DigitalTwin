@@ -104,7 +104,7 @@ Il modello gestisce le **catene cinematiche chiuse** tramite una strategia di ap
 
 ### `exoskeleton_dynamics`
 
-Plant dinamico ridotto a 1-DOF. Nodo principale: `ExoDynamicsControlTest`.
+Plant dinamico ridotto a 1-DOF.
 
 **Equazione del moto ridotta:**
 
