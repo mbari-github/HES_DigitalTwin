@@ -25,6 +25,7 @@ setup(
     entry_points={
     'console_scripts': [
         'fault_injector = exoskeleton_faults.fault_injector:main',
+        'fault_framework = exoskeleton_faults.fault_framework:main',
     ],
 },
 )

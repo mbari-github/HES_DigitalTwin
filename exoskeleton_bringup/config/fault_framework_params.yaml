@@ -1,0 +1,39 @@
+fault_injector:
+  ros__parameters:
+
+    # ======================
+    # Core
+    # ======================
+    channel: 2
+    fault_active: true
+
+    # ======================
+    # Pipeline (JSON string)
+    # ======================
+    fault_pipeline_config: >
+      [
+        {
+          "type": "bias_drift",
+          "std": 0.0005
+        },
+        {
+          "type": "noise",
+          "std": 0.01
+        },
+        {
+          "type": "quantization",
+          "resolution": 0.005
+        }
+      ]
+
+    # ======================
+    # Channel-specific
+    # ======================
+    target_index: 0
+    joint_name: "rev_crank"
+    fault_js_field: "position"
+
+    # ======================
+    # Timing
+    # ======================
+    publish_rate: 200.0
