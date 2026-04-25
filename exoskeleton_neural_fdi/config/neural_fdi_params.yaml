@@ -18,7 +18,7 @@ neural_fdi_node:
     # Skip phases if data/models already exist:
     #   skip_collect: true  → skip COLLECT, go to TRAIN (requires CSV)
     #   skip_train:   true  → skip COLLECT+TRAIN, go to INFERENCE (requires .pt)
-    skip_collect: true
+    skip_collect: true  
     skip_train: true
 
     # ── Phase 2: Training ───────────────────────────────────

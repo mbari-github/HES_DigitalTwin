@@ -344,7 +344,7 @@ def main():
     torch.save({
         'model_state_dict': encoder_obs.state_dict(),
         'config': {
-            'input_size': 2,
+            'input_size': 3,
             'hidden_size': args.hidden,
             'num_layers': args.layers,
             'window_size': args.window,
