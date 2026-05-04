@@ -8,6 +8,7 @@ Digital Twin ROS 2 di un esoscheletro per la riabilitazione della mano (Hand Exo
 
 ## Indice
 
+- [Docker](#docker)
 - [Architettura del sistema](#architettura-del-sistema)
 - [Pacchetti ROS 2](#pacchetti-ros-2)
 - [Prerequisiti](#prerequisiti)
@@ -19,6 +20,56 @@ Digital Twin ROS 2 di un esoscheletro per la riabilitazione della mano (Hand Exo
 - [Fault Injection](#fault-injection)
 - [Struttura del workspace](#struttura-del-workspace)
 - [Note per lo sviluppo futuro](#note-per-lo-sviluppo-futuro)
+
+---
+
+## Docker
+
+Il progetto include un `Dockerfile` ottimizzato basato su **ROS 2 Jazzy** (Ubuntu 24.04 Noble) che integra tutte le dipendenze necessarie, inclusi **Pinocchio** (via robotpkg), NumPy, SciPy e le utility grafiche.
+
+### 1. Build dell'immagine
+Dalla root del repository, compila l'immagine assegnandole un tag:
+```bash
+docker build -t hes_digital_twin .
+```
+### 2. Avvio del container
+Per il corretto funzionamento di RViz2 e delle GUI Python (Tkinter), è necessario fornire al container l'accesso al server X dell'host e l'accelerazione hardware per la GPU.
+#### Configurazione iniziale (solo la prima volta per sessione):
+```bash
+docker build -t hes_digital_twin .
+```
+
+#### Esecuzione con supporto GPU (Consigliata):
+Utilizza questo comando per abilitare l'accelerazione grafica (fondamentale per la fluidità di RViz) e mappare i dispositivi video:
+```bash
+sudo docker run -it --rm \
+  --net=host \
+  --env="DISPLAY" \
+  --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
+  --device="/dev/dri:/dev/dri" \
+  hes_digital_twin
+```
+#### Esecuzione per Sviluppo (Mount del codice):
+Utilizza questo comando se desideri modificare il codice sul tuo PC (es. tramite VS Code) e vedere i cambiamenti riflessi istantaneamente nel container senza dover rifare la build:
+```bash
+sudo docker run -it --rm \
+  --net=host \
+  --env="DISPLAY" \
+  --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
+  --volume="$(pwd):/ros2_ws/src/HES_DigitalTwin" \
+  --device="/dev/dri:/dev/dri" \
+  hes_digital_twin
+```
+
+### 3. Utilizzo
+Una volta all'interno del container, il workspace è già compilato e sourced. Puoi avviare direttamente lo stack:
+```bash
+ros2 launch exoskeleton_bringup full_sim.launch.py
+```
+Se RViz dovesse mostrare errori relativi ai driver grafici nonostante il flag --device, prova ad aggiungere --env="LIBGL_ALWAYS_SOFTWARE=1" al comando di run per forzare il rendering via CPU (più lento ma compatibile).
+
+
+
 
 ---
 
@@ -38,7 +89,7 @@ Quando il bridge è attivo, tutti i segnali di controllo passano attraverso `Exo
 
 ## Pacchetti ROS 2
 
-### `exoskeletron_description`
+### `exoskeleton_description`
 
 Modello URDF dell'esoscheletro con mesh STL e configurazioni RViz.
 
@@ -51,9 +102,9 @@ Modello URDF dell'esoscheletro con mesh STL e configurazioni RViz.
 
 Il modello gestisce le **catene cinematiche chiuse** tramite una strategia di apertura della catena: i giunti di chiusura sono sostituiti da coppie di frame di riferimento la cui coincidenza è imposta a livello software dal risolutore di chiusura.
 
-### `exoskeletron_dynamics`
+### `exoskeleton_dynamics`
 
-Plant dinamico ridotto a 1-DOF. Nodo principale: `ExoDynamicsControlTest`.
+Plant dinamico ridotto a 1-DOF.
 
 **Equazione del moto ridotta:**
 
@@ -75,7 +126,7 @@ dove `M_eff = Bᵀ M B + Jm`, `proj = Bᵀ(M Ḃ θ̇ + h)`, e `B = dq/dθ` è i
 - `dynamics_stripped` — versione semplificata (tau_ext come override scalare)
 - `exo_dynamics` — versione completa con wrench esterna cartesiana
 
-### `exoskeletron_control`
+### `exoskeleton_control`
 
 Architettura di controllo a cascata con due nodi indipendenti.
 
@@ -96,7 +147,7 @@ L'output `[θ_v, θ̇_v, θ̈_v]` è il riferimento per l'inner loop. Supporta i
 
 L'attrito Coulomb **non** viene compensato nel feed-forward (causa sovracompensazione). In modalità STOP, il controller mantiene solo la componente gravitazionale statica (`g_proj` snapshot pre-stop).
 
-### `exoskeletron_supervision`
+### `exoskeleton_supervision`
 
 **ExoBridge** — Gateway di sicurezza tra controller e plant. Tutte le coppie e i riferimenti di traiettoria passano attraverso questo nodo.
 
@@ -118,7 +169,7 @@ L'attrito Coulomb **non** viene compensato nel feed-forward (causa sovracompensa
 
 - **Status completo** — `/exo_bridge/status` (9 campi: `is_stop`, `is_limited`, `θ`, `θ̇`, `θ_hold`, `τ_out`, `τ_ext`, `mode_id`, `τ_raw`) fornisce a tutti i supervisori il quadro completo dello stato del gateway.
 
-### `exoskeletron_safety_manager`
+### `exoskeleton_safety_manager`
 
 State machine plugin-based in C++ che gestisce la sicurezza funzionale.
 
@@ -145,7 +196,7 @@ State machine plugin-based in C++ che gestisce la sicurezza funzionale.
 
 - **Periodo di grazia all'avvio** — il plugin `FaultMonitorMode` sopprime la valutazione delle soglie per un intervallo configurabile dopo l'inizializzazione, per evitare false escalation durante la fase di stabilizzazione dei segnali all'avvio del sistema.
 
-### `exoskeletron_observers`
+### `exoskeleton_observers`
 
 Modulo di fault detection model-based con quattro livelli complementari.
 
@@ -158,7 +209,7 @@ Modulo di fault detection model-based con quattro livelli complementari.
 
 > **Stato attuale:** il modulo è operativo e pubblica residui in tempo reale, ma **non è ancora collegato alla catena decisionale della safety**. L'integrazione tramite `SENSOR_DEGRADED_MODE` è il prossimo passo.
 
-### `exoskeletron_faults`
+### `exoskeleton_faults`
 
 Framework di fault injection controllata per la validazione del sistema di sicurezza.
 
@@ -175,13 +226,13 @@ Framework di fault injection controllata per la validazione del sistema di sicur
 
 Tutti i parametri sono modificabili a runtime via `ros2 param set` senza riavviare il nodo.
 
-### `exoskeletron_safety_msgs`
+### `exoskeleton_safety_msgs`
 
 Messaggi e servizi custom:
 - `SafetyStatus.msg` — stato completo della state machine (stato, fault, downgrade, bridge supervision)
 - `SetMode.srv` — richiesta cambio modalità al bridge (`nominal`/`compliant`/`torque_limit`/`stop`)
 
-### `exoskeletron_utils`
+### `exoskeleton_utils`
 
 Utility per testing e sviluppo:
 - `external_wrench_pub` — pubblica wrench sinusoidale cartesiana
@@ -190,7 +241,7 @@ Utility per testing e sviluppo:
 - `GUI` — GUI Tkinter minimale per comandare coppia via slider
 - `logger` — logger CSV multi-topic per analisi offline
 
-### `exoskeletron_bringup`
+### `exoskeleton_bringup`
 
 Launch files e configurazioni YAML centralizzate.
 
@@ -231,7 +282,7 @@ source install/setup.bash
 Avvia dynamics, admittance controller, trajectory controller, RViz, e input step. Nessun bridge né safety.
 
 ```bash
-ros2 launch exoskeletron_bringup testing.launch.py
+ros2 launch exoskeleton_bringup testing.launch.py
 ```
 
 ### `control_loop_only.launch.py` — Solo loop di controllo
@@ -239,7 +290,7 @@ ros2 launch exoskeletron_bringup testing.launch.py
 Simile a `testing.launch.py` ma usa `dynamics_stripped` (versione semplificata del plant). Utile per testare il sistema passando l'input scelto direttamente a `tau_ext_theta`, e non a `external_wrench`, in modo da bypassare la riduzione sul DoF.
 
 ```bash
-ros2 launch exoskeletron_bringup control_loop_only.launch.py
+ros2 launch exoskeleton_bringup control_loop_only.launch.py
 ```
 
 ### `testing_bridge.launch.py` — Sistema completo con bridge e safety
@@ -247,7 +298,7 @@ ros2 launch exoskeletron_bringup control_loop_only.launch.py
 Avvia l'intero stack: plant, controller, bridge, state machine (con ritardo 5s), e opzionalmente il fault injector (in questo caso invece l'input è passato a `external_wrench`).
 
 ```bash
-ros2 launch exoskeletron_bringup testing_bridge.launch.py
+ros2 launch exoskeleton_bringup testing_bridge.launch.py
 ```
 
 Per configurare la fault injection, modificare le variabili nella sezione `CONFIGURAZIONE FAULT INJECTION` in testa al file:
@@ -264,14 +315,14 @@ FAULT_ACTIVE    = False     # Attivare a runtime con ros2 param set
 Plant + controller + observer + fault injector, senza bridge né safety manager.
 
 ```bash
-ros2 launch exoskeletron_bringup injection_testing.launch.py
+ros2 launch exoskeleton_bringup injection_testing.launch.py
 ```
 
 ---
 
 ## Configurazione
 
-Tutti i parametri sono centralizzati in `exoskeletron_bringup/config/`:
+Tutti i parametri sono centralizzati in `exoskeleton_bringup/config/`:
 
 | File | Descrizione |
 |---|---|
@@ -376,7 +427,7 @@ Il fault injector si inserisce come proxy trasparente tra produttore e consumato
 
 ```
 HES_DigitalTwin/
-├── exoskeletron_bringup/          # Launch files e configurazioni YAML
+├── exoskeleton_bringup/          # Launch files e configurazioni YAML
 │   ├── config/
 │   │   ├── dynamics_params.yaml
 │   │   ├── exo_bridge_params.yaml
@@ -387,15 +438,15 @@ HES_DigitalTwin/
 │       ├── testing_bridge.launch.py
 │       ├── control_loop_only.launch.py
 │       └── injection_testing.launch.py
-├── exoskeletron_control/          # Admittance + Trajectory controller
-├── exoskeletron_description/      # URDF, mesh STL, configurazioni RViz
-├── exoskeletron_dynamics/         # Plant dinamico (Pinocchio-based)
-├── exoskeletron_faults/           # Framework fault injection
-├── exoskeletron_observers/        # Observer per fault detection
-├── exoskeletron_safety_manager/   # State machine C++ (pluginlib)
-├── exoskeletron_safety_msgs/      # Messaggi e servizi custom
-├── exoskeletron_supervision/      # ExoBridge (gateway di sicurezza)
-└── exoskeletron_utils/            # GUI, logger, generatori di input
+├── exoskeleton_control/          # Admittance + Trajectory controller
+├── exoskeleton_description/      # URDF, mesh STL, configurazioni RViz
+├── exoskeleton_dynamics/         # Plant dinamico (Pinocchio-based)
+├── exoskeleton_faults/           # Framework fault injection
+├── exoskeleton_observers/        # Observer per fault detection
+├── exoskeleton_safety_manager/   # State machine C++ (pluginlib)
+├── exoskeleton_safety_msgs/      # Messaggi e servizi custom
+├── exoskeleton_supervision/      # ExoBridge (gateway di sicurezza)
+└── exoskeleton_utils/            # GUI, logger, generatori di input
 ```
 
 ---
