@@ -1,0 +1,54 @@
+state_machine:
+  ros__parameters:
+    # Values below are for testing only — all thresholds MUST be declared as Double
+    # ── Soglie coppia — attivazione [Nm] ────────────────────────────
+    fault_monitor.tau_compliant_threshold:    5.0
+    fault_monitor.tau_torque_limit_threshold: 7.5
+    fault_monitor.tau_safe_stop_threshold:    10.0
+
+    # ── Soglie velocità — attivazione [rad/s] ───────────────────────
+    fault_monitor.vel_compliant_threshold:    1.5
+    fault_monitor.vel_torque_limit_threshold: 2.0
+    fault_monitor.vel_safe_stop_threshold:    3.0
+
+    # ── Automatic downgrade ──────────────────────────────────────────
+    # If false, transitions to less restrictive states can only happen
+    # via manual ROS services:
+    #   - /compliant_mode_request  (SetBool, data: false)
+    #   - /torque_limit_request    (SetBool, data: false)
+    #   - /reset_safety_request    (Trigger)
+    #
+    # Recommended: false.
+    # Set to true only if faults are predominantly transient.
+    fault_monitor.enable_automatic_downgrade: false
+
+    # ── Soglie coppia — uscita/downgrade [Nm] ───────────────────────
+    fault_monitor.tau_compliant_exit:         4.5
+    fault_monitor.tau_torque_limit_exit:      7.0
+
+    # ── Soglie velocità — uscita/downgrade [rad/s] ──────────────────
+    fault_monitor.vel_compliant_exit:         0.8
+    fault_monitor.vel_torque_limit_exit:      1.5
+
+    # ── Watchdog su /exo_bridge/status [s] ──────────────────────────
+    fault_monitor.status_timeout_seconds:     0.75
+
+    # ── Periodo di grazia all'avvio [s] ─────────────────────────────
+    fault_monitor.grace_period_seconds:       4.0
+
+    # ── Debounce escalation ──────────────────────────────────────────
+    fault_monitor.compliant_count_threshold:  3.0
+    fault_monitor.torque_count_threshold:     3.0
+    fault_monitor.stop_count_threshold:       2.0
+
+    # ── Downgrade debounce ───────────────────────────────────────────
+    # 2000 samples @ 200 Hz = 10 s of clean signal required to downgrade
+    fault_monitor.downgrade_count_threshold:  2000
+    # Weight of negative samples: 1 negative cancels N positives.
+    # With K=5: 83% of samples must be positive to advance the counter.
+    fault_monitor.downgrade_negative_weight:  5
+
+# ── Watchdog sulla liveness del bridge [s] ──────────────────────────
+    bridge_liveness_timeout_sec: 0.5
+    bridge_liveness_grace_sec:   3.0
+

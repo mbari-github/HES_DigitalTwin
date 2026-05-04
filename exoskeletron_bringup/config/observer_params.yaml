@@ -1,0 +1,66 @@
+observer_node:
+  ros__parameters:
+
+    # ── Base configuration ───────────────────────────────────────────────────
+    joint_name:     'rev_crank'
+    publish_rate:   200.0           # [Hz] — must match the plant publish rate
+
+    # ── Plant model (must match dynamics_params.yaml) ────────────────────────
+    fric_visc:      2.0             # [Nm·s/rad]  viscous friction
+    fric_coul:      2.0             # [Nm]        Coulomb friction
+    fric_eps:       0.005           # [rad/s]     tanh threshold for Coulomb
+    damping_theta:  1.0             # [Nm·s/rad]  additional linear damping
+
+    # ── Observer 1 — Luenberger (encoder / joint_states fault detection) ────
+    #
+    # Observer poles must be faster than the plant poles.
+    # Linearized plant: λ1=0, λ2 = -(fric_visc+damping_theta)/M_eff ≈ -20.
+    # Observer: poles ~2-3× faster → [-15, -20] is a good starting point.
+    #
+    # More negative = faster convergence but higher noise sensitivity.
+    # If the nominal residual is too noisy, move poles toward 0.
+    # If the residual is too slow to react to a fault, move poles toward -∞.
+    #
+    # Stability rule for explicit Euler at dt=5 ms: keep |pole| < 1/dt = 200.
+    # Plant dominant pole ≈ -(fric_visc+damping)/M_eff ≈ -6.
+    # Observer 2-3× faster is sufficient.
+    #
+    # Gain derivation: l1 = -(p1+p2) - D/M  →  with p1=-15, p2=-20, D/M≈6: l1 = +29
+    #                  l2 = p1·p2 - l1·D/M  →  300 - 174 = 126
+    # l1 positive is CORRECT: it guarantees the correction term reduces the error.
+    obs1_pole_1:   -15.0
+    obs1_pole_2:   -20.0
+
+    # ── Observer 2 — Force Balance (tau_ext / force sensor fault detection) ──
+    #
+    # Estimates τ_ext from the algebraic force balance (works even when stationary):
+    #   τ̂_ext = M_eff·θ̈ + proj + τ_fric_lin - τ_m - τ_pass
+    #
+    # obs2_alpha_acc: EMA filter on the dirty-derivative of θ̇ for estimating θ̈.
+    #
+    # Bag analysis showed that M_eff·θ̈ contributes only 0.005 Nm std to the
+    # residual → derivative noise is negligible. A high alpha_acc can be used
+    # without noise penalty. 0.50 → group delay ≈ 5 ms (almost no lag).
+    obs2_alpha_acc:  0.50
+
+    # obs2_alpha_tau: EMA filter on τ̂_ext.
+    #
+    # With alpha_tau=0.05 the residual was dominated by lag (660 ms measured),
+    # not by noise. Raising to 0.30 reduces lag to ~12 ms and improves nominal
+    # residual std from 0.21 Nm to ~0.004 Nm (50× improvement).
+    # 0.30 → group delay ≈ 12 ms.
+    obs2_alpha_tau:  0.30
+
+    # ── EMA filter on residuals ──────────────────────────────────────────────
+    # alpha ∈ (0, 1]:
+    #   alpha = 1    → no filter (raw residual)
+    #   alpha = 0.1  → aggressive filter (time constant ≈ 10 samples = 50 ms at 200 Hz)
+    #   alpha = 0.05 → slower filter    (time constant ≈ 20 samples = 100 ms)
+    #
+    # Use the filtered residual for safety thresholds to reduce false positives.
+    residual_filter_alpha: 0.05
+
+    # ── RMS window ───────────────────────────────────────────────────────────
+    # Number of samples for the residual RMS computation (published in debug).
+    # 50 samples @ 200 Hz = 250 ms window.
+    rms_window:     50

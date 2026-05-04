@@ -1,0 +1,34 @@
+exo_bridge:
+  ros__parameters:
+    # ── Main loop rate [Hz] ──────────────────────────────────────────
+    publish_rate_hz:      200.0
+
+    # ── Torque limits for safe modes [Nm] ────────────────────────────
+    override_tau_limit:   2.0
+    compliant_tau_limit:  4.0
+
+    # ── Kinematic limits for compliant mode ──────────────────────────
+    compliant_vel_limit:  1.0   # [rad/s]
+    compliant_acc_limit:  2.0   # [rad/s²]
+
+    # ── STOP mode behaviour ──────────────────────────────────────────
+    # zero_torque_only     → zero the torque command (DEFAULT — safest)
+    # hold_only            → hold position with tau clamped to hold_tau_limit
+    # hold_and_zero_torque → hold position and zero torque
+    #
+    # NOTE: 'hold_only' does NOT pass tau unchanged.
+    # Tau is clamped to ±hold_tau_limit to prevent divergent control loops
+    # if theta is frozen or there is a fault on the joint_states channel.
+    stop_mode: 'zero_torque_only'
+
+    # ── Torque limit for hold_only mode [Nm] ─────────────────────────
+    # Used only when stop_mode = 'hold_only'.
+    # Size this to the torque needed to hold the mechanism statically
+    # against gravity (not the dynamic peak).
+    hold_tau_limit:       4.0
+
+    # ── Input channel watchdog timeout [s] ───────────────────────────
+    watchdog_timeout_sec: 0.5
+
+    # ── Startup grace period [s] ─────────────────────────────────────
+    watchdog_grace_sec:   2.0

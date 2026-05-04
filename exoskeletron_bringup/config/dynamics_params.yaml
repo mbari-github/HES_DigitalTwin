@@ -1,0 +1,41 @@
+dynamics:
+  ros__parameters:
+    # ── Friction on the reduced DOF (theta = rev_crank) ─────────────
+    #
+    # Model:
+    #   tau_fric = fric_visc * theta_dot
+    #              + fric_coul * tanh(theta_dot / fric_eps)
+    #   tau_damp = damping_theta * theta_dot
+    #
+    # Design rationale for a "friction-dominated" system that holds still
+    # against gravity:
+    #
+    #   fric_coul must exceed |g_proj_max| in the worst-case posture.
+    #   Typical g_proj on this mechanism is ~0.3–0.8 Nm depending on
+    #   configuration. 2.0 Nm provides a comfortable margin.
+    #
+    #   A small fric_eps (0.005) makes tanh behave almost like sign():
+    #   Coulomb friction is fully engaged at ~0.005 rad/s (≈ 0.3°/s),
+    #   effectively acting as static friction.
+    #
+    #   High fric_visc damps motion once it starts, preventing residual
+    #   oscillations after a stop.
+    #
+    #   damping_theta adds pure linear damping, useful for quickly
+    #   attenuating transients without changing steady-state behaviour.
+    #
+    # Previous values (for reference):
+    #   fric_visc: 0.3   fric_coul: 0.3   fric_eps: 0.01   damping_theta: 0.0
+    #
+    fric_visc:      2.0    # [Nm·s/rad]  was 0.3  — viscous damping
+    fric_coul:      2.0    # [Nm]        was 0.3  — Coulomb / static friction
+    fric_eps:       0.005  # [rad/s]     was 0.01 — tanh velocity threshold
+    damping_theta:  1.0    # [Nm·s/rad]  was 0.0  — additional linear damping
+
+    # ── Motor inertia ────────────────────────────────────────────────
+    # Unchanged — does not affect steady-state behaviour
+    motor_inertia:  0.1
+
+    # ── Kinematic limits ─────────────────────────────────────────────
+    max_theta_dot:  10.0
+    max_theta_ddot: 400.0

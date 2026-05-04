@@ -1,0 +1,4 @@
+string mode   # nominal / compliant / torque_limit / stop
+---
+bool success
+string message
